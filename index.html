@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeckAI · Generador de diapositivas con IA</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128250;</text></svg>">
+<link rel="stylesheet" href="assets/css/app.css">
+<link rel="stylesheet" href="assets/css/slides.css">
+</head>
+<body>
+
+<!-- ============ ICONOS ============ -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h8M8 21v-6h8v6"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h4M9 13h6M9 17h4"/></symbol>
+  <symbol id="i-slides" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M12 16v4M8 20h8"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M19.1 4.9l-2.2 2.2M7.1 16.9l-2.2 2.2"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-9 9"/></symbol>
+  <symbol id="i-magic" viewBox="0 0 24 24"><path d="M4 20l10-10M14 4l1 3 3 1-3 1-1 3-1-3-3-1 3-1zM19 13l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7v.5M12 17h.01"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h9a7 7 0 0 1 0 14H8"/></symbol>
+  <symbol id="i-notes" viewBox="0 0 24 24"><path d="M5 3h14v18H5z"/><path d="M9 8h6M9 12h6M9 16h4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24"><path d="M15 4V2M15 10V8M12.5 6h-2M19.5 6h-2M4 20l9-9 2 2-9 9z"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">&#9679;</span>
+    <span class="brand-name">DeckAI</span>
+    <span class="save-state" id="saveState" data-state="guardado" title="Todo se guarda solo en este navegador">
+      <i></i><span>Guardado</span>
+    </span>
+  </div>
+
+  <nav class="topbar-actions" aria-label="Acciones de la presentación">
+    <div class="tgroup">
+      <button class="btn" id="btnNew" title="Empezar una presentación vacía">
+        <svg class="ic"><use href="#i-file"></use></svg><span>Nueva</span></button>
+      <button class="btn" id="btnOpen" title="Abrir una presentación guardada (.json)">
+        <svg class="ic"><use href="#i-folder"></use></svg><span>Abrir</span></button>
+      <button class="btn" id="btnSave" title="Guardar ahora en este navegador (Ctrl+S)">
+        <svg class="ic"><use href="#i-save"></use></svg><span>Guardar</span></button>
+    </div>
+
+    <div class="tgroup">
+      <button class="btn" id="btnPptx" title="Descargar PowerPoint editable (.pptx)">
+        <svg class="ic"><use href="#i-slides"></use></svg><span>PowerPoint</span></button>
+      <button class="btn" id="btnPdf" title="Imprimir o guardar como PDF">
+        <svg class="ic"><use href="#i-file"></use></svg><span>PDF</span></button>
+    </div>
+
+    <div class="tgroup">
+      <button class="btn btn-ghost" id="btnChat" title="Pide cambios a la IA con tus palabras (Ctrl+K)">
+        <svg class="ic"><use href="#i-chat"></use></svg><span>Asistente</span></button>
+      <button class="btn btn-ghost" id="btnSettings" title="Configurar proveedor y claves de IA">
+        <svg class="ic"><use href="#i-gear"></use></svg><span>Ajustes</span></button>
+      <button class="btn btn-ghost icon-only" id="btnHelp" title="Guía rápida y atajos de teclado">
+        <svg class="ic"><use href="#i-help"></use></svg><span class="sr">Ayuda</span></button>
+    </div>
+
+    <button class="btn btn-primary" id="btnPresent" title="Modo presentación a pantalla completa (F5)">
+      <svg class="ic"><use href="#i-play"></use></svg><span>Presentar</span></button>
+  </nav>
+</header>
+
+<main class="layout">
+
+  <!-- ============ PANEL IZQUIERDO: generador ============ -->
+  <aside class="panel panel-left" id="panelLeft">
+    <div class="pblock-lead">
+      <h2 class="lead-title">Crea tu presentación</h2>
+      <p class="lead-sub">Tres pasos y la tienes lista. Luego la retocas con la IA.</p>
+    </div>
+
+    <section class="pblock step" data-step="1">
+      <h3 class="step-title"><span class="step-dot">1</span> Cuéntanos de qué va</h3>
+
+      <label class="field">
+        <span>Tema de la presentación <b>*</b></span>
+        <textarea id="fTopic" rows="3" placeholder="Ej. Inteligencia Artificial aplicada a la educación secundaria"></textarea>
+      </label>
+
+      <div class="examples">
+        <span class="examples-label">Prueba con uno de estos</span>
+        <div class="examples-row" id="examples"></div>
+      </div>
+
+      <div class="field-row">
+        <label class="field">
+          <span>Nº de diapositivas</span>
+          <input type="number" id="fCount" min="3" max="40" value="10">
+        </label>
+        <label class="field">
+          <span>Idioma</span>
+          <select id="fLanguage">
+            <option value="es">Español</option>
+            <option value="en">English</option>
+            <option value="pt">Português</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+          </select>
+        </label>
+      </div>
+
+      <details class="more">
+        <summary><svg class="ic"><use href="#i-plus"></use></svg> Más opciones</summary>
+        <div class="more-body">
+          <div class="field-row">
+            <label class="field">
+              <span>Público</span>
+              <input type="text" id="fAudience" placeholder="Ej. alumnos de 3º de secundaria">
+            </label>
+            <label class="field">
+              <span>Tono</span>
+              <select id="fTone">
+                <option value="profesional">Profesional</option>
+                <option value="divertido">Divertido / cercano</option>
+                <option value="tecnico">Técnico y detallado</option>
+                <option value="inspirador">Inspirador</option>
+                <option value="academic">Académico</option>
+                <option value="vendedor">Persuasivo / comercial</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            <span>Estilo visual</span>
+            <input type="text" id="fStyle" placeholder="Ej. minimalista, con datos y gráficos, tono de Startup">
+          </label>
+          <label class="field">
+            <span>Instrucciones extra</span>
+            <textarea id="fNotes" rows="2" placeholder="Ej. incluir un caso de uso real, evitar tecnicismos, mencionar X al final"></textarea>
+          </label>
+          <p class="hint">Cuanto más concreto seas aquí, mejor lo hará la IA. Puedes dejarlo todo en blanco.</p>
+        </div>
+      </details>
+    </section>
+
+    <section class="pblock step" data-step="2">
+      <h3 class="step-title"><span class="step-dot">2</span> Elige la plantilla</h3>
+      <div id="themeGrid" class="theme-grid"></div>
+    </section>
+
+    <section class="pblock step" data-step="3">
+      <h3 class="step-title"><span class="step-dot">3</span> Genera y edita</h3>
+      <label class="check">
+        <input type="checkbox" id="fImages">
+        <span>Añadir imágenes generadas por IA <small id="imgModelHint"></small></span>
+      </label>
+      <button class="btn btn-primary btn-block" id="btnGenerate">
+        <svg class="ic"><use href="#i-wand"></use></svg><span>Generar presentación</span>
+      </button>
+      <div class="progress" id="genProgress" hidden>
+        <div class="progress-bar"><i></i></div>
+        <p class="progress-text"></p>
+      </div>
+      <p class="hint" id="keyHint"></p>
+
+      <div class="after-gen">
+        <p class="after-gen-title">¿Y después?</p>
+        <ul class="after-gen-list">
+          <li><b>Haz clic</b> en cualquier texto del lienzo para editarlo.</li>
+          <li><b>Pregunta al asistente</b>: «resume la 3 en 3 viñetas».</li>
+          <li><b>Arrastra</b> tus imágenes sobre la diapositiva.</li>
+          <li><b>Presenta</b> con <kbd>F5</kbd> cuando esté lista.</li>
+        </ul>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ============ CENTRO: lienzo ============ -->
+  <section class="canvas" id="canvas">
+    <div class="canvas-toolbar">
+      <div class="tb-group">
+        <button class="tb-btn" id="btnAdd" title="Añadir una diapositiva vacía después de la actual">
+          <svg class="ic"><use href="#i-plus"></use></svg><span>Diapositiva</span></button>
+        <button class="tb-btn" id="btnGenImages" title="Generar con IA las imágenes que falten">
+          <svg class="ic"><use href="#i-magic"></use></svg><span>Generar imágenes</span></button>
+        <button class="tb-btn" id="btnNotes" title="Ver las notas del orador de toda la presentación">
+          <svg class="ic"><use href="#i-notes"></use></svg><span>Notas</span></button>
+      </div>
+      <div class="tb-group">
+        <button class="tb-btn only-narrow" id="btnPanel" title="Ver las diapositivas y el inspector" aria-expanded="false">
+          <svg class="ic"><use href="#i-slides"></use></svg><span>Diapositivas</span></button>
+        <span class="tb-label" id="counter">0 diapositivas</span>
+      </div>
+    </div>
+
+    <div class="stage-scroll" id="stageScroll">
+      <div class="deck-wrap" id="deckWrap">
+        <div class="deck" id="deck"></div>
+      </div>
+
+      <div class="empty" id="emptyState">
+        <div class="empty-card">
+          <div class="empty-icon">&#128250;</div>
+          <h3>Empecemos por tu idea</h3>
+          <p class="empty-sub">Escribe de qué va la presentación y la IA se encarga del texto y el diseño.</p>
+
+          <ol class="empty-steps">
+            <li><span class="n">1</span> Escribe el tema en el panel de la izquierda</li>
+            <li><span class="n">2</span> Elige la plantilla que más te guste</li>
+            <li><span class="n">3</span> Pulsa <b>Generar presentación</b></li>
+          </ol>
+
+          <div class="empty-actions">
+            <button class="btn btn-primary" id="btnEmptyGo">
+              <svg class="ic"><use href="#i-wand"></use></svg><span>Escribir mi tema</span></button>
+            <button class="btn" id="btnEmptyBlank">
+              <svg class="ic"><use href="#i-file"></use></svg><span>Empezar en blanco</span></button>
+            <button class="btn btn-ghost" id="btnEmptyOpen">
+              <svg class="ic"><use href="#i-folder"></use></svg><span>Abrir un archivo</span></button>
+          </div>
+
+          <p class="empty-foot" id="emptyHint"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PANEL DERECHO: miniaturas e inspector ============ -->
+  <aside class="panel panel-right" id="panelRight">
+    <div class="pblock pblock-fill">
+      <div class="pblock-head">
+        <h2 class="pblock-title">Diapositivas</h2>
+        <span class="pill" id="thumbCount">0</span>
+        <button class="icon-btn" id="btnAddTop" title="Añadir diapositiva">
+          <svg class="ic"><use href="#i-plus"></use></svg>
+        </button>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+      <button class="add-slide" id="btnAddFoot">
+        <svg class="ic"><use href="#i-plus"></use></svg><span>Añadir diapositiva</span>
+      </button>
+    </div>
+    <div class="pblock" id="inspector">
+      <div class="pblock-head">
+        <h2 class="pblock-title" id="inspTitle">Inspector</h2>
+      </div>
+      <div id="inspectorBody" class="inspector-body">
+        <p class="hint">Selecciona una diapositiva para editarla.</p>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- ============ AJUSTES ============ -->
+<dialog id="dlgSettings" class="dlg">
+  <form method="dialog">
+    <h3>Ajustes de la IA</h3>
+    <p class="hint">Puedes usar varias claves a la vez: si una se queda sin cuota o el servicio está saturado,
+      la app prueba el siguiente proveedor automáticamente.</p>
+
+    <label class="field">
+      <span>Proveedor de texto</span>
+      <select id="fProvider"></select>
+    </label>
+    <p class="hint" id="providerHint"></p>
+
+    <label class="field" id="keyField">
+      <span id="keyLabel">Clave API</span>
+      <input type="password" id="fKey" placeholder="" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint key-row">
+      <button type="button" class="btn btn-sm" id="btnCheckKey">Comprobar clave</button>
+      <span id="keyCheck" class="key-check"></span>
+    </p>
+    <p class="hint" id="keyHelp">
+      Consigue la clave en
+      <a id="keyUrl" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
+    </p>
+    <label class="check">
+      <input type="checkbox" id="fRemember">
+      <span>Recordar las claves en este dispositivo</span>
+    </label>
+
+    <div class="field-row">
+      <label class="field">
+        <span>Modelo de texto</span>
+        <select id="fModel"></select>
+      </label>
+      <button type="button" class="btn" id="btnListModels">Ver modelos</button>
+    </div>
+    <label class="field is-hidden" id="wrapTextCustom">
+      <span>ID del modelo de texto</span>
+      <input type="text" id="fModelCustom" placeholder="gemini-3.7-flash" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint" id="modelHint"></p>
+
+    <details class="extra-keys" id="extraKeys">
+      <summary>Otras claves guardadas (<span id="extraCount">0</span>)</summary>
+      <div id="extraKeysBody"></div>
+    </details>
+
+    <label class="check">
+      <input type="checkbox" id="fAutoRetry">
+      <span>Si falla, cambiar de modelo y de proveedor automáticamente</span>
+    </label>
+    <label class="check">
+      <input type="checkbox" id="fCooperativo">
+      <span>Trabajo en equipo: repartir las diapositivas entre todos los modelos que tengan clave</span>
+    </label>
+    <p class="hint">Un modelo escribe el guion y después varios modelos redactan partes a la vez.
+      Si uno se queda sin tokens, otro retoma su parte. Solo se activa si hay dos o más claves.</p>
+
+    <hr class="sep">
+
+    <h4>Imágenes</h4>
+    <label class="field">
+      <span>Proveedor de imágenes</span>
+      <select id="fImgProvider"></select>
+    </label>
+    <p class="hint" id="imgProviderHint"></p>
+
+    <!-- Campo de clave del proveedor de IMÁGENES. Cuando el proveedor de
+         imágenes no es el mismo que el de texto, su clave no se edita arriba:
+         este input es el único sitio donde pegarla. -->
+    <div id="wrapImgKey">
+      <label class="field" id="imgKeyField">
+        <span id="imgKeyLabel">Clave</span>
+        <input type="password" id="fImgKey" placeholder="" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="hint key-row">
+        <button type="button" class="btn btn-sm" id="btnCheckImgKey">Comprobar clave</button>
+        <span id="imgKeyCheck" class="key-check"></span>
+      </p>
+      <p class="hint" id="imgKeyHelp">
+        Se consigue en
+        <a id="imgKeyUrl" href="https://openrouter.ai/keys" target="_blank" rel="noopener">aquí</a>.
+      </p>
+    </div>
+
+    <div class="field-row">
+      <label class="field">
+        <span>Modelo de imágenes</span>
+        <select id="fImgModel"></select>
+      </label>
+      <button type="button" class="btn" id="btnListImgModels">Ver modelos</button>
+    </div>
+    <label class="field is-hidden" id="wrapImgCustom">
+      <span>ID del modelo de imágenes</span>
+      <input type="text" id="fImgModelCustom" placeholder="black-forest-labs/flux.2-pro" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint" id="imgModelWarn"></p>
+    <p class="hint"><b>Gratis de verdad:</b> <em>AI Horde</em> genera imágenes sin clave ni tarjeta
+      (es una red comunitaria: cada imagen tarda 10-60 s en la cola) y <em>Pollinations</em> también
+      funciona sin clave. <em>Hugging Face</em> sirve Stable Diffusion 3 con su cuota mensual, y en
+      <em>OpenRouter</em> hay tres modelos de imagen sin coste (<em>Muse Image</em> y los dos
+      <em>Ming Image</em>). Gemini usa la familia <em>Nano Banana</em>; el resto de OpenRouter cubre los
+      modelos de pago (FLUX, GPT Image, Seedream, Ideogram, Recraft…). La clave de cada proveedor se
+      guarda aparte y puedes dejar «Generar imágenes» sin usar si prefieres subir las tuyas.</p>
+
+    <div class="dlg-actions">
+      <button class="btn" value="cancel">Cancelar</button>
+      <button class="btn btn-primary" id="btnSaveSettings" value="save">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ AYUDA ============ -->
+<dialog id="dlgHelp" class="dlg dlg-wide">
+  <form method="dialog">
+    <h3>Guía rápida</h3>
+
+    <div class="help-grid">
+      <section>
+        <h4>Crear</h4>
+        <ol class="help-list">
+          <li>Escribe el tema y elige cuántas diapositivas quieres.</li>
+          <li>Elige la plantilla: puedes cambiarla luego cuando quieras.</li>
+          <li>Pulsa <b>Generar presentación</b>.</li>
+        </ol>
+        <p class="hint">Si no hay clave de IA, la app te lleva a <b>Ajustes</b> para pegarla.</p>
+      </section>
+
+      <section>
+        <h4>Editar</h4>
+        <ul class="help-list">
+          <li><b>Clic</b> en un texto del lienzo para reescribirlo.</li>
+          <li><b>Enter</b> en una viñeta crea la siguiente.</li>
+          <li><b>Arrastra</b> una imagen desde el escritorio a la diapositiva.</li>
+          <li>En <b>Inspector</b> cambias el diseño y las imágenes.</li>
+          <li>En <b>ventanas estrechas</b>, el botón <b>Diapositivas</b> de la barra del lienzo abre la lista.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h4>Asistente</h4>
+        <p class="hint">Con una diapositiva seleccionada, dile qué quieres en tus palabras:</p>
+        <ul class="help-list">
+          <li>«Quítale la última viñeta»</li>
+          <li>«Pásala a dos columnas»</li>
+          <li>«Añade una diapositiva de conclusiones»</li>
+        </ul>
+        <p class="hint">Cada respuesta trae su propio <b>deshacer</b>.</p>
+      </section>
+
+      <section>
+        <h4>Atajos</h4>
+        <table class="help-keys">
+          <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Abrir el asistente</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Generar la presentación</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Z</kbd></td><td>Deshacer un cambio del asistente</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Guardar ahora</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Abrir un archivo</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Exportar a PowerPoint</td></tr>
+          <tr><td><kbd>F5</kbd></td><td>Modo presentación</td></tr>
+          <tr><td><kbd>↑</kbd><kbd>↓</kbd></td><td>Cambiar de diapositiva</td></tr>
+          <tr><td><kbd>Supr</kbd></td><td>Eliminar la diapositiva seleccionada</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Abrir y cerrar esta guía</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Cerrar el asistente o este diálogo</td></tr>
+        </table>
+      </section>
+    </div>
+
+    <p class="hint">Las ilustraciones usan un proveedor aparte del de texto: en <b>Ajustes → Imágenes</b> eliges
+      entre <b>Gemini</b> (Nano Banana), <b>OpenRouter</b> (55 modelos: FLUX, GPT Image, Seedream, Recraft…) o
+      <b>Pollinations</b> (60 modelos). Cada uno recuerda su modelo y, si uno falla, se prueban los demás que
+      tengan clave.</p>
+
+    <div class="dlg-actions">
+      <button class="btn btn-primary" value="ok">Entendido</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ NOTAS DEL ORADOR ============ -->
+<dialog id="dlgNotes" class="dlg dlg-wide">
+  <form method="dialog">
+    <h3>Notas del orador</h3>
+    <div id="notesList" class="notes-list"></div>
+    <div class="dlg-actions">
+      <button class="btn btn-primary" value="ok">Cerrar</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ MODO PRESENTACIÓN ============ -->
+<div class="present" id="present" hidden>
+  <div class="present-stage">
+    <div class="deck-wrap" id="presentWrap">
+      <div class="deck" id="presentDeck"></div>
+    </div>
+  </div>
+  <div class="present-bar">
+    <button class="pb-btn" id="pPrev" title="Anterior (←)">&#8249;</button>
+    <span class="pb-count"><b id="pCur">1</b> / <span id="pTotal">1</span></span>
+    <button class="pb-btn" id="pNext" title="Siguiente (→)">&#8250;</button>
+    <span class="pb-timer" id="pTimer">00:00</span>
+    <button class="pb-btn" id="pNotes" title="Notas (N)">Notas</button>
+    <button class="pb-btn" id="pOverview" title="Todas las diapositivas (O)">&#9638;</button>
+    <button class="pb-btn" id="pExit" title="Salir (Esc)">&#10005;</button>
+  </div>
+  <div class="present-progress"><i id="pProgress"></i></div>
+  <div class="overview" id="overview" hidden>
+    <div class="overview-grid" id="overviewGrid"></div>
+  </div>
+  <div class="present-notes" id="presentNotes" hidden></div>
+</div>
+
+<!-- ============ ASISTENTE ============ -->
+<aside class="chat" id="chat" hidden aria-label="Asistente">
+  <header class="chat-head">
+    <h2>Asistente</h2>
+    <div class="chat-tools">
+      <button class="btn btn-sm icon-only" id="chatUndo" title="Deshacer el último cambio (Ctrl+Alt+Z)" disabled>
+        <svg class="ic"><use href="#i-undo"></use></svg></button>
+      <button class="btn btn-sm" id="chatClear" title="Empezar una conversación nueva">Limpiar</button>
+      <button class="btn btn-sm icon-only" id="chatClose" title="Cerrar (Esc)">
+        <svg class="ic"><use href="#i-close"></use></svg></button>
+    </div>
+  </header>
+
+  <div class="chat-log" id="chatLog"></div>
+  <div class="chat-sugs" id="chatSugs"></div>
+
+  <form class="chat-compose" id="chatForm">
+    <textarea id="chatInput" rows="2" spellcheck="false"
+      placeholder="Pide un cambio: «ponla en dos columnas», «añade una cita», «haz la portada más llamativa»…"></textarea>
+    <button class="btn btn-primary" id="chatSend" type="submit">Enviar</button>
+  </form>
+  <p class="hint chat-hint" id="chatHint"></p>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+<script src="assets/js/config.js"></script>
+<script src="assets/js/store.js"></script>
+<script src="assets/js/gemini.js"></script>
+<script src="assets/js/prompt.js"></script>
+<script src="assets/js/providers.js"></script>
+<script src="assets/js/render.js"></script>
+<script src="assets/js/editor.js"></script>
+<script src="assets/js/images.js"></script>
+<script src="assets/js/chat.js"></script>
+<script src="assets/js/present.js"></script>
+<script src="assets/js/exports.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
