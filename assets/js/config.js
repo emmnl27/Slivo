@@ -2,6 +2,51 @@
    DeckAI · configuración, temas y layouts
    ============================================================ */
 
+/* Tope de seguridad para las peticiones a la IA. Si un proveedor deja la
+   conexión abierta sin responder, se corta y la app prueba el siguiente en
+   lugar de quedarse "pensando" para siempre. */
+const IA_TIMEOUT = 60000;        // texto y listados
+const IA_IMG_TIMEOUT = 150000;   // imágenes (tardan más)
+
+/* Cancelación manual: una operación de IA (generar, rehacer, hablar con el
+   asistente) abre un "abanico" con nuevaOperacionIA(); el botón Cancelar llama a
+   cancelarIA() y todas las peticiones en vuelo se abortan de golpe. */
+let _iaCancel = null;
+
+function nuevaOperacionIA() {
+  _iaCancel = new AbortController();
+  return _iaCancel;
+}
+
+function cancelarIA() {
+  if (_iaCancel && !_iaCancel.signal.aborted) _iaCancel.abort();
+}
+
+function IA_CANCELADA() {
+  return !!(_iaCancel && _iaCancel.signal.aborted);
+}
+
+function fetchTimeout(url, opts = {}, ms = IA_TIMEOUT) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const ext = _iaCancel && _iaCancel.signal;
+  const onExt = () => ctrl.abort();
+  if (ext) {
+    if (ext.aborted) ctrl.abort();
+    else ext.addEventListener('abort', onExt, { once: true });
+  }
+  return fetch(url, Object.assign({}, opts, { signal: ctrl.signal }))
+    .finally(() => {
+      clearTimeout(timer);
+      if (ext) ext.removeEventListener('abort', onExt);
+    });
+}
+
+/* ¿El error viene de haber cortado la petición por tardar demasiado? */
+function esAborto(e) {
+  return !!e && (e.name === 'AbortError' || e.code === 'ABORT_ERR');
+}
+
 const CONFIG = {
   slideW: 1280,
   slideH: 720,
@@ -53,6 +98,16 @@ const CONFIG = {
       keyLabel: 'Clave de Mistral', keyPlaceholder: '',
       keyUrl: 'https://console.mistral.ai/api-keys',
       note: 'Modelos europeos, gratis y muy rápidos.'
+    },
+    {
+      id: 'deepseek', short: 'DeepSeek', name: 'DeepSeek (barato y bueno)', style: 'openai', needsKey: true,
+      keyPrefix: 'sk-',
+      // La API es OpenAI-compatible, pero por defecto corta la respuesta a 4096
+      // tokens: se pide el máximo (8192) para que quepan las presentaciones largas.
+      maxTokens: 8192,
+      keyLabel: 'Clave de DeepSeek', keyPlaceholder: 'sk-...',
+      keyUrl: 'https://platform.deepseek.com/api_keys',
+      note: 'Muy barato y bueno escribiendo. deepseek-chat respeta el JSON; deepseek-reasoner razona más pero a veces se sale del esquema.'
     },
     {
       id: 'huggingface', short: 'Hugging Face', name: 'Hugging Face (texto e imágenes gratis)', style: 'openai', needsKey: true, imagen: true,
@@ -121,6 +176,10 @@ const CONFIG = {
       { id: 'ministral-8b-latest',   label: 'Ministral 8B',   note: 'Muy rápido' },
       { id: 'open-mistral-nemo',     label: 'Mistral Nemo',   note: 'Ligero' }
     ],
+    deepseek: [
+      { id: 'deepseek-chat',     label: 'DeepSeek Chat',     note: 'Recomendado · respeta el JSON' },
+      { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', note: 'Razona más · a veces no respeta el JSON' }
+    ],
     pollinations: [
       { id: 'openai/gpt-5.4-nano',  label: 'GPT-5.4 Nano',   note: 'Barato y rápido' },
       { id: 'google/gemini-3.8-flash', label: 'Gemini 3.8 Flash', note: 'Rápido y capaz' },
@@ -145,6 +204,7 @@ const CONFIG = {
     pollinations: 'openai/gpt-5.4-nano',
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-small-latest',
+    deepseek: 'deepseek-chat',
     huggingface: '',
     ollama: 'llama3.2'
   },
@@ -244,7 +304,12 @@ const LAYOUTS = [
   { id: 'two-col', name: 'Dos columnas' },
   { id: 'image',   name: 'Imagen + texto' },
   { id: 'image-full', name: 'Imagen a sangre' },
+  { id: 'gallery', name: 'Galería de imágenes' },
   { id: 'stats',   name: 'Datos clave' },
+  { id: 'bars',    name: 'Gráfico de barras' },
+  { id: 'table',   name: 'Tabla' },
+  { id: 'checklist', name: 'Verificación' },
+  { id: 'cards',   name: 'Tarjetas' },
   { id: 'timeline',name: 'Proceso / pasos' },
   { id: 'quote',   name: 'Cita' },
   { id: 'closing', name: 'Cierre' }
@@ -339,4 +404,30 @@ const TONES = {
 
 const LANGUAGES = {
   es: 'español', en: 'inglés', pt: 'portugués', fr: 'francés', de: 'alemán'
+};
+
+/* Cuánto texto debe escribir la IA en cada diapositiva. Sin esto los modelos
+   se ciñen a 4 palabras por viñeta y la presentación queda vacía de contenido. */
+const DENSIDADES = {
+  ligero: {
+    nombre: 'ligero (solo ideas)',
+    bullets: '3 o 4',
+    palabras: '4 a 8 palabras',
+    frases: 'una frase corta',
+    extra: '- Con este nivel se busca la diapositiva limpia: ideas escuetas, sin desarrollo.'
+  },
+  normal: {
+    nombre: 'normal (frases completas)',
+    bullets: '4 o 5',
+    palabras: '10 a 18 palabras',
+    frases: 'una o dos frases',
+    extra: '- Cada viñeta dice algo que el público no sabía: concreta y con un verbo claro.'
+  },
+  detallado: {
+    nombre: 'detallado (con desarrollo)',
+    bullets: '5 o 6',
+    palabras: '18 a 30 palabras',
+    frases: '2 o 3 frases',
+    extra: '- Desarrolla cada idea: qué es, por qué importa y un ejemplo, una cifra o una consecuencia. No te quedes en la conclusión: enséñala.'
+  }
 };

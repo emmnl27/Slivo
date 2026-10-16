@@ -13,9 +13,13 @@ const Chat = (() => {
   const MAX_MENSAJES = 40;     // mensajes guardados en el navegador
   const MAX_PILOTOS = 10;      // instantáneas para deshacer
   const MAX_VUELTOS = 6;       // turnos de contexto que se le envían al modelo
+  const MAX_IMAGENES_IA = 3; // imágenes generadas por IA en una sola respuesta (tardan)
+  const TIEMPO_IA = 150000;  // presupuesto total de una respuesta del asistente
 
   let instantaneas = [];       // [{ id, deck, selected }]
   let ocupado = false;
+  let tInicio = 0;             // cuándo empezó la petición en curso
+  let tTick = null;            // temporizador que refresca "Pensando… (Ns)"
 
   const hilo = () => (Store.state.chat || (Store.state.chat = []));
 
@@ -38,12 +42,59 @@ const Chat = (() => {
     return i;
   }
 
+  /** A qué diapositivas apunta una acción: "slide", "slides":[...] o "all":true. */
+  function objetivos(a, d) {
+    if (a.all === true || a.all === 'true' || a.slide === 'all') return d.slides.map((_, i) => i);
+    if (Array.isArray(a.slides)) {
+      return a.slides.map(apunta).filter(i => i >= 0 && d.slides[i]);
+    }
+    const i = apunta(a.slide);
+    return (i >= 0 && d.slides[i]) ? [i] : [];
+  }
+
+  /* ---------- qué pide el usuario: foto de internet o imagen generada ---------- */
+
+  const R_FOTOS = /\b(foto|fotos|imagen|imagenes|imágenes|web|internet|online|wikimedia|openverse|commons|banco de im[aá]genes)\b/i;
+  const R_GENERA = /\b(genera\w*|generado|generar|ilustra\w*|ilustraci[óo]n|dibuja\w*|diseñ\w*|creativ\w*|logo|cartel|con ia|hecho con ia|inteligencia artificial)\b/i;
+
+  /**
+   * ¿El usuario pide fotos que ya existen en internet? Es la red de seguridad:
+   * si pide imágenes sin pedir que se generen, y el modelo contesta con
+   * set_image (que tarda minutos y a veces se queda colgado), lo cambiamos por
+   * web_image, que es inmediato y no necesita clave.
+   */
+  function pideFotosWeb(texto) {
+    const t = String(texto || '');
+    if (R_GENERA.test(t)) return false;
+    return R_FOTOS.test(t);
+  }
+
+  /**
+   * Ajusta lo que devuelve el modelo a lo que el usuario pidió de verdad: si se
+   * piden fotos de internet y el modelo contestar con set_image (que tarda
+   * minutos y a veces no termina), lo pasamos a web_image, que es inmediato.
+   */
+  function adaptaAcciones(lista, web) {
+    if (!Array.isArray(lista)) return [];
+    return lista.map(a => {
+      if (!a || typeof a !== 'object') return a;
+      const pideWeb = web || a.source === 'web';
+      if (a.op === 'web_image') return Object.assign({}, a, { source: 'web' });
+      if (a.op === 'set_image' && pideWeb) {
+        return Object.assign({}, a, { op: 'web_image', query: a.query || a.prompt, source: 'web' });
+      }
+      return a;
+    });
+  }
+
   /* ---------- contexto que se le envía al modelo ---------- */
 
   function resumenSlide(s, i) {
     const o = { n: i + 1, layout: s.layout };
-    ['kicker', 'title', 'subtitle', 'quote', 'quoteAuthor', 'imagePrompt', 'notes']
+    ['kicker', 'title', 'subtitle', 'quote', 'quoteAuthor', 'notes']
       .forEach(k => { if (s[k]) o[k] = corte(s[k], 220); });
+    const proms = Store.slidePrompts(s).filter(Boolean);
+    if (proms.length) o.imagePrompts = proms.map(x => corte(x, 220));
     if (s.bullets.length) o.bullets = s.bullets.map(x => corte(x, 160));
     if (s.columns.length) {
       o.columns = s.columns.map(c => ({
@@ -53,7 +104,8 @@ const Chat = (() => {
     }
     if (s.stats.length) o.stats = s.stats.map(x => ({ value: corte(x.value, 24), label: corte(x.label, 90) }));
     if (s.steps.length) o.steps = s.steps.map(x => ({ title: corte(x.title, 70), text: corte(x.text, 160) }));
-    if (s.image) o.imagen_ya_puesta = true;
+    const imgs = Store.slideImages(s).filter(Boolean).length;
+    if (imgs) o.imagenes_puestas = imgs;
     return o;
   }
 
@@ -85,22 +137,34 @@ const Chat = (() => {
     '4. {"op":"move_slide","slide":7,"to":2}',
     '5. {"op":"duplicate_slide","slide":2}',
     '6. {"op":"set_theme","theme":"corporate"}',
-    '7. {"op":"set_image","slide":2,"prompt":"descripción de la foto en inglés, sin texto"}',
-    '8. {"op":"remove_image","slide":2}',
-    '9. {"op":"set_deck","fields":{"title":"...","subtitle":"...","author":"...","date":"..."}}',
-    '10. {"op":"find_replace","find":"IA","replace":"inteligencia artificial"}',
+    '7. {"op":"set_image","slide":2,"prompt":"descripción de la foto en inglés","slot":0} → GENERA la imagen con IA. "slot" es opcional: rellena el hueco 0-3 de una galería',
+    '8. {"op":"web_image","slide":2,"query":"cohete despegando","slot":0} → busca una FOTO REAL ya existente en internet (Wikimedia Commons u Openverse, gratis y sin clave) y la pone en el hueco. Admite "slide":2, "slides":[2,3,4] o "all":true para todas las diapositivas',
+    '9. {"op":"remove_image","slide":2,"slot":0}',
+    '10. {"op":"set_deck","fields":{"title":"...","subtitle":"...","author":"...","date":"..."}}',
+    '11. {"op":"find_replace","find":"IA","replace":"inteligencia artificial"}',
+    '',
+    'ELEGIR ENTRE UNA Y OTRA IMAGEN:',
+    '- Si el usuario pide fotos reales, "de internet", "de la web", "de Wikimedia", "de un banco de imágenes"',
+    '  o simplemente "una foto de X" → usa web_image (es instantáneo y no necesita clave).',
+    '- Si pide una imagen generada, ilustrada, dibujada, un logo o "con IA" → usa set_image (tarda más).',
+    '- Para varias diapositivas de golpe, mejor una sola acción web_image con "all":true o "slides":[...],',
+    '  que muchas acciones set_image seguidas.',
     '',
     'LAYOUTS: cover (portada) · section (separador) · agenda (índice) · bullets (viñetas) ·',
     'two-col (dos columnas) · image (imagen + texto) · image-full (imagen a sangre) ·',
-    'stats (datos) · timeline (proceso) · quote (cita) · closing (cierre).',
+    'gallery (2-4 imágenes en rejilla) · stats (datos) · bars (gráfico de barras) ·',
+    'table (tabla) · checklist (verificación) · cards (tarjetas) · timeline (proceso) · quote (cita) · closing (cierre).',
     '',
     'CAMPOS DE UNA DIAPOSITIVA:',
     '- layout: uno de los de arriba.',
-    '- texto corto: kicker (etiqueta), title, subtitle, notes (notas del orador), imagePrompt.',
+    '- texto corto: kicker (etiqueta), title, subtitle, notes (notas del orador), imagePrompt / imagePrompts (lista).',
     '- cover, section, closing: necesitan un "subtitle" con una frase.',
-    '- agenda, bullets, image: "bullets": ["idea 1","idea 2","idea 3"] (de 3 a 6, cortas).',
+    '- agenda, bullets, image, checklist: "bullets": ["idea 1","idea 2","idea 3"] (de 3 a 6, cortas).',
     '- two-col: "columns": [{"heading":"A","items":["...","..."]},{"heading":"B","items":["..."]}] (2 o 3 columnas).',
     '- stats: "stats": [{"value":"42%","label":"qué mide"}] (de 2 a 4).',
+    '- bars: "stats" igual que stats pero con cifras comparables (de 3 a 5).',
+    '- table: "tcols": ["Año","Ventas"] y "trows": [["2024","1M"],["2025","2M"]].',
+    '- cards: "cards": [{"heading":"Ventaja","text":"por qué importa"}] (de 2 a 4).',
     '- timeline: "steps": [{"title":"Paso 1","text":"qué ocurre"}] (de 3 a 5).',
     '- quote: "quote" (la frase) y "quoteAuthor".',
     '',
@@ -126,7 +190,7 @@ const Chat = (() => {
   /* ---------- aplicar los cambios ---------- */
 
   const TEXTO = ['kicker', 'title', 'subtitle', 'quote', 'quoteAuthor', 'notes', 'imagePrompt'];
-  const LISTAS = ['bullets', 'columns', 'stats', 'steps'];
+  const LISTAS = ['bullets', 'columns', 'stats', 'steps', 'tcols', 'trows', 'cards'];
 
   /** Campos admitidos en "fields" de una diapositiva. */
   function camposSanos(fields) {
@@ -134,13 +198,16 @@ const Chat = (() => {
     if (!fields || typeof fields !== 'object') return out;
     TEXTO.forEach(k => { if (fields[k] != null) out[k] = corte(String(fields[k]), 600); });
     LISTAS.forEach(k => { if (fields[k] != null) out[k] = fields[k]; });
+    if (Array.isArray(fields.imagePrompts)) {
+      out.imagePrompts = fields.imagePrompts.slice(0, 4).map(x => corte(String(x), 600));
+    }
     if (fields.layout && LAYOUT_IDS.includes(fields.layout)) out.layout = fields.layout;
     return out;
   }
 
   const CUERPO = {
-    agenda: 'bullets', bullets: 'bullets', image: 'bullets', 'two-col': 'columns',
-    stats: 'stats', timeline: 'steps', quote: 'quote'
+    agenda: 'bullets', bullets: 'bullets', image: 'bullets', checklist: 'bullets', 'two-col': 'columns',
+    stats: 'stats', bars: 'stats', timeline: 'steps', quote: 'quote', table: 'trows', cards: 'cards'
   };
 
   /** ¿Le falta el cuerpo que pide el layout? */
@@ -158,7 +225,15 @@ const Chat = (() => {
         s.columns = [{ heading: 'A', items: ['', '', ''] }, { heading: 'B', items: ['', '', ''] }];
         break;
       case 'stats':
+      case 'bars':
         s.stats = [{ value: '00%', label: 'Indicador' }, { value: '00', label: 'Indicador' }, { value: '00%', label: 'Indicador' }];
+        break;
+      case 'table':
+        s.tcols = ['Año', 'Dato'];
+        s.trows = [['2024', '…'], ['2025', '…']];
+        break;
+      case 'cards':
+        s.cards = [{ heading: 'Ventaja', text: 'Por qué importa' }, { heading: 'Ventaja', text: 'Por qué importa' }];
         break;
       case 'timeline':
         s.steps = [{ title: 'Paso 1', text: '' }, { title: 'Paso 2', text: '' }, { title: 'Paso 3', text: '' }];
@@ -169,9 +244,11 @@ const Chat = (() => {
       case 'cover': case 'section': case 'closing':
         if (!s.subtitle) s.subtitle = 'Una frase de apoyo';
         break;
-      case 'image-full':
-        if (!s.imagePrompt) s.imagePrompt = s.title;
+      case 'image-full': case 'gallery': {
+        const pr = Store.slidePrompts(s);
+        if (!pr.some(Boolean) && s.title) { pr[0] = s.title; s.imagePrompts = pr; }
         break;
+      }
       default:
         if (CUERPO[s.layout] && !s.bullets.length) s.bullets = ['Punto clave', 'Segunda idea', 'Tercera idea'];
     }
@@ -180,9 +257,10 @@ const Chat = (() => {
 
   /** Contenido que pertenece a cada layout (lo demás se descarta al cambiar). */
   const PERTENECE = {
-    cover: [], section: [], closing: [], 'image-full': [], quote: [],
-    agenda: ['bullets'], bullets: ['bullets'], image: ['bullets'],
-    'two-col': ['columns'], stats: ['stats'], timeline: ['steps']
+    cover: [], section: [], closing: [], 'image-full': [], gallery: [], quote: [],
+    agenda: ['bullets'], bullets: ['bullets'], image: ['bullets'], checklist: ['bullets'],
+    'two-col': ['columns'], stats: ['stats'], bars: ['stats'], timeline: ['steps'],
+    table: ['tcols', 'trows'], cards: ['cards']
   };
 
   /** Aplica campos a una diapositiva conservando su identidad y su imagen. */
@@ -198,7 +276,8 @@ const Chat = (() => {
 
     const norm = Store.normalizeDeck({ slides: [base] }).slides[0];
     norm.id = slide.id;
-    norm.image = slide.image;                 // la imagen solo cambia con set_image / remove_image
+    norm.images = slide.images;               // las imágenes solo cambian con set_image / remove_image
+    norm.imgCount = Store.imgCount(slide);
     if (cuerpoVacio(norm)) rellena(norm);
     return norm;
   }
@@ -211,6 +290,7 @@ const Chat = (() => {
       return v.split(find).join(re);
     };
     TEXTO.forEach(k => { slide[k] = sub(slide[k]); });
+    if (Array.isArray(slide.imagePrompts)) slide.imagePrompts = slide.imagePrompts.map(sub);
     if (slide.bullets) slide.bullets = slide.bullets.map(sub);
     if (slide.columns) slide.columns.forEach(c => { c.heading = sub(c.heading); c.items = (c.items || []).map(sub); });
     if (slide.stats) slide.stats.forEach(s => { s.value = sub(s.value); s.label = sub(s.label); });
@@ -220,16 +300,24 @@ const Chat = (() => {
 
   /**
    * Ejecuta las acciones del modelo. Devuelve las etiquetas de lo que cambió
-   * y un aviso si alguna no se pudo aplicar.
+   * y un aviso si alguna no se pudo aplicar. `limite` es un plazo (ms) para
+   * que una tanda de imágenes no se quede pensando indefinidamente.
    */
-  async function aplicar(actions) {
+  async function aplicar(actions, limite) {
     const lista = Array.isArray(actions) ? actions : [];
     const etiquetas = [];
     const avisos = [];
     const d = App.deck();
+    let generadas = 0;                 // imágenes de IA ya pedidas en esta tanda
+    let parados = false;
 
     for (const a of lista) {
       if (!a || typeof a !== 'object' || !a.op) continue;
+      if (parados) break;
+      if (limite && Date.now() > limite) {
+        parados = true;
+        avisos.push('Me he pasado de tiempo: he aplicado solo una parte. Dime "continúa" para seguir con el resto.');
+      }
       try {
         switch (a.op) {
           case 'set_slide': {
@@ -282,7 +370,7 @@ const Chat = (() => {
             break;
           }
           case 'set_theme': {
-            const t = THEMES.find(x => x.id === a.theme);
+            const t = Store.themes().find(x => x.id === a.theme);
             if (!t) { avisos.push('Plantilla desconocida: ' + a.theme); break; }
             d.theme = t.id;
             App.setTheme(t.id);
@@ -297,25 +385,71 @@ const Chat = (() => {
             etiquetas.push('Datos de la presentación');
             break;
           }
-          case 'set_image': {
-            const i = apunta(a.slide);
-            if (i < 0 || !d.slides[i]) { avisos.push('No existe la diapositiva ' + a.slide); break; }
-            const s = d.slides[i];
-            if (a.prompt) s.imagePrompt = corte(String(a.prompt), 400);
-            if (!Providers.imageReady()) {
-              etiquetas.push('Descripción de imagen en la ' + (i + 1) + ' (falta una clave de Gemini, OpenRouter o Pollinations)');
+          case 'web_image': {
+            const idxs = objetivos(a, d);
+            if (!idxs.length) { avisos.push('No existe esa diapositiva'); break; }
+            const q = corte(String(a.query || a.prompt || ''), 200).trim();
+            if (!q) { avisos.push('Falta saber qué foto buscar'); break; }
+            let lista;
+            try {
+              lista = await Web.buscar(q, { n: 24 });
+            } catch (e) {
+              avisos.push('No pude buscar fotos: ' + e.message);
               break;
             }
-            s.image = await Images.shrink(await Providers.image(Prompt.image(s, d)));
+            if (!lista.length) { avisos.push('No hay fotos de «' + q + '» en internet'); break; }
+            let puestas = 0;
+            for (let k = 0; k < idxs.length; k++) {
+              const i = idxs[k];
+              const slot = a.slot != null ? (parseInt(a.slot, 10) || 0) : 0;
+              const res = idxs.length > 1 ? lista[k % lista.length] : Web.mejor(lista);
+              try {
+                await Web.usar(d.slides[i], slot, res);
+                puestas++;
+                etiquetas.push('Foto de internet (' + res.source + ') · ' + (Store.imgCount(d.slides[i]) > 1
+                  ? 'hueco ' + (slot + 1) + ' de la ' + (i + 1)
+                  : 'diapositiva ' + (i + 1)));
+              } catch (e) {
+                avisos.push('No se pudo descargar la foto de la ' + (i + 1) + ': ' + e.message);
+              }
+            }
+            break;
+          }
+          case 'set_image': {
+            if (generadas >= MAX_IMAGENES_IA) {
+              avisos.push('He generado ' + MAX_IMAGENES_IA + ' imágenes de una vez (cada una tarda); dime "sigue" para las demás.');
+              break;
+            }
+            const i = apunta(a.slide);
+            const s = d.slides[i];
+            const slot = a.slot != null ? (parseInt(a.slot, 10) || 0) : 0;
+            Store.fitSlots(s, Math.max(Store.imgCount(s), slot + 1));
+            if (a.prompt) {
+              const pr = Store.slidePrompts(s);
+              pr[slot] = corte(String(a.prompt), 400);
+              s.imagePrompts = pr;
+            }
+            if (!Providers.imageReady()) {
+              etiquetas.push('Descripción de imagen en la ' + (i + 1) + ' (falta una clave de Gemini, OpenRouter, Hugging Face o AI Horde)');
+              break;
+            }
+            generadas++;
+            const arr = Store.slideImages(s);
+            arr[slot] = await Images.shrink(await Providers.image(Prompt.image(s, d, slot)));
+            s.images = arr;
             if (!Images.CON_IMAGEN.includes(s.layout)) Images.aseguraVisible(s);
-            etiquetas.push('Imagen en la ' + (i + 1));
+            etiquetas.push('Imagen en la ' + (i + 1) + (Store.imgCount(s) > 1 ? ' (hueco ' + (slot + 1) + ')' : ''));
             break;
           }
           case 'remove_image': {
             const i = apunta(a.slide);
             if (i < 0 || !d.slides[i]) { avisos.push('No existe la diapositiva ' + a.slide); break; }
-            d.slides[i].image = '';
-            etiquetas.push('Quitada la imagen de la ' + (i + 1));
+            const s = d.slides[i];
+            const slot = a.slot != null ? (parseInt(a.slot, 10) || 0) : 0;
+            const arr = Store.slideImages(s);
+            arr[slot] = '';
+            s.images = arr;
+            etiquetas.push('Quitada la imagen de la ' + (i + 1) + (Store.imgCount(s) > 1 ? ' (hueco ' + (slot + 1) + ')' : ''));
             break;
           }
           case 'find_replace': {
@@ -413,8 +547,9 @@ const Chat = (() => {
   function refreshHint() {
     const h = $('chatHint');
     if (!h) return;
+    const seg = ocupado && tInicio ? Math.round((Date.now() - tInicio) / 1000) : 0;
     h.textContent = ocupado
-      ? 'Pensando…'
+      ? 'Pensando…' + (seg ? ' (' + seg + ' s)' : '')
       : (Providers.chain().length
         ? `Viendo la diapositiva ${sel() + 1} de ${nSlides()} · ${Providers.current()}`
         : 'Sin clave de IA: los cambios no se aplicarán hasta que añadas una en Ajustes.');
@@ -433,6 +568,8 @@ const Chat = (() => {
     }
     pintaSugerencias();
     refreshHint();
+    const bc = $('chatCancel');
+    if (bc) bc.hidden = !ocupado;
     log.scrollTop = log.scrollHeight;
   }
 
@@ -473,6 +610,10 @@ const Chat = (() => {
 
     anota({ role: 'user', text: texto });
     ocupado = true;
+    nuevaOperacionIA();               // el botón Cancelar aborta la consulta en vuelo
+    tInicio = Date.now();
+    clearInterval(tTick);
+    tTick = setInterval(refreshHint, 1000);
     $('chatSend').disabled = true;
     pintar();
 
@@ -488,12 +629,32 @@ const Chat = (() => {
       'Responde con el JSON que se ha descrito.'
     ].join('\n');
 
+    /* Red de seguridad extra: askJson ya acota su tiempo, pero si algo quedara
+       colgado, este tope libera el asistente y le dice al usuario qué pasó.
+       El plazo cubre también aplicar(): así una tanda de imágenes no puede
+       dejar al asistente "pensando" media eternidad. */
+    let topeId;
+    const tope = new Promise((_, rej) => {
+      topeId = setTimeout(() => {
+        rej(Object.assign(new Error('La IA está tardando demasiado (más de 2 minutos y medio). He parado la espera: reinténtalo o cambia de proveedor en Ajustes.'), { _timeout: true }));
+      }, TIEMPO_IA + 30000);
+    });
+
+    const web = pideFotosWeb(texto);
     try {
-      const r = await Providers.askJson({ system: SISTEMA(), user });
-      const d = r.data || {};
-      const id = d.actions && d.actions.length ? uid() : null;
-      if (id) instantanea(id);
-      const res = await aplicar(d.actions);
+      const r = await Promise.race([
+        (async () => {
+          const r = await Providers.askJson({ system: SISTEMA(), user });
+          const d = r.data || {};
+          const acciones = adaptaAcciones(d.actions, web);
+          const id = acciones.length ? uid() : null;
+          if (id) instantanea(id);
+          const res = await aplicar(acciones, Date.now() + TIEMPO_IA);
+          return { d, acciones, id, res };
+        })(),
+        tope
+      ]);
+      const { d, id, res } = r;
       anota({
         role: 'bot',
         text: String(d.reply || (res.cambios ? 'Listo.' : 'No he hecho ningún cambio.')),
@@ -504,13 +665,17 @@ const Chat = (() => {
       Store.save();
       Editor.refresh();
     } catch (e) {
-      anota({ role: 'bot', text: e.message, avisos: [] });
+      const texto = IA_CANCELADA() ? 'He cancelado la operación. Dime otra cosa cuando quieras.' : e.message;
+      anota({ role: 'bot', text: texto, avisos: [] });
       if (e._errores) console.warn('Asistente · errores por proveedor:', e._errores);
     } finally {
+      clearTimeout(topeId);
+      clearInterval(tTick);
+      tTick = null;
       ocupado = false;
       $('chatSend').disabled = false;
       pintar();
-      $('chatInput').focus();
+      if (!IA_CANCELADA()) $('chatInput').focus();
     }
   }
 
@@ -528,6 +693,7 @@ const Chat = (() => {
       reset();
     };
     $('chatSend').onclick = enviar;
+    $('chatCancel').onclick = () => cancelarIA();
     $('chatForm').addEventListener('submit', e => { e.preventDefault(); enviar(); });
     $('chatInput').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); }
@@ -552,5 +718,5 @@ const Chat = (() => {
     pintar();
   }
 
-  return { init, toggle, pintar, refreshHint, reset, enviar, aplicar, undo, instantanea };
+  return { init, toggle, pintar, refreshHint, reset, enviar, aplicar, undo, instantanea, pideFotosWeb, adaptaAcciones, objetivos };
 })();

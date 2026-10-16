@@ -42,34 +42,38 @@ const Images = (() => {
     }
   }
 
-  function placeholder(i, on) {
-    const slot = document.querySelector(`#deck .slide[data-index="${i}"] .img-slot`);
-    if (slot) slot.classList.toggle('loading', !!on);
+  function placeholder(i, slot, on) {
+    const el = document.querySelector(`#deck .slide[data-index="${i}"] .img-slot[data-slot="${slot}"]`);
+    if (el) el.classList.toggle('loading', !!on);
   }
 
   /* ---------- carga manual ---------- */
 
-  /** Layouts que ya tienen hueco para una imagen. */
-  const CON_IMAGEN = ['cover', 'image', 'image-full'];
+  /** Layouts que ya tienen hueco(s) para imágenes. */
+  const CON_IMAGEN = ['cover', 'image', 'image-full', 'gallery'];
 
-  /** Si el layout actual no puede mostrar la imagen, se cambia a uno que sí. */
+  /** Si el layout actual no puede mostrar imágenes, se cambia a uno que sí. */
   function aseguraVisible(slide) {
     if (CON_IMAGEN.includes(slide.layout)) return false;
-    slide.layout = 'image';
-    if (!slide.bullets.length) slide.bullets = ['Punto clave', 'Segunda idea', 'Tercera idea'];
+    slide.layout = 'gallery';
+    Store.fitSlots(slide, Math.max(1, Store.imgCount(slide)));
     return true;
   }
 
-  async function useFile(file, slide) {
+  async function useFile(file, slide, slot = 0) {
     if (!file || !slide) return;
     if (!/^image\//.test(file.type)) { Store.toast('Eso no es una imagen.', 'err'); return; }
     try {
-      slide.image = await shrink(await readAsDataURL(file));
+      Store.fitSlots(slide, Math.max(Store.imgCount(slide), slot + 1));
+      const data = await shrink(await readAsDataURL(file));
       const cambiado = aseguraVisible(slide);
+      const arr = Store.slideImages(slide);
+      arr[slot] = data;
+      slide.images = arr;
       Store.save();
-      Editor.refresh();
+      Editor.refreshOf(slide);
       Store.toast(cambiado
-        ? 'Imagen añadida · he cambiado el layout a «Imagen» para que se vea'
+        ? 'Imagen añadida · he cambiado el layout a «Galería» para que se vea'
         : 'Imagen añadida', 'ok');
     } catch (e) {
       Store.toast(e.message, 'err');
@@ -78,37 +82,96 @@ const Images = (() => {
 
   /* ---------- generación con IA ---------- */
 
-  async function one(index) {
+  async function one(index, slot = 0) {
     const deck = App.deck();
     const slide = deck.slides[index];
-    if (!slide) return;
+    if (!slide) return false;
 
-    placeholder(index, true);
+    Store.fitSlots(slide, Math.max(Store.imgCount(slide), slot + 1));
+    placeholder(index, slot, true);
     try {
-      const url = await Providers.image(Prompt.image(slide, deck));
-      slide.image = await shrink(url);
+      const url = await Providers.image(Prompt.image(slide, deck, slot));
+      const data = await shrink(url);
+      const arr = Store.slideImages(slide);
+      arr[slot] = data;
+      slide.images = arr;
       Store.save();
-      Editor.refresh();
-      Store.toast('Imagen lista (' + (index + 1) + ')', 'ok');
+      Editor.refreshSlide(index);
+      const n = Store.imgCount(slide);
+      Store.toast('Imagen lista (' + (index + 1) + (n > 1 ? ' · hueco ' + (slot + 1) : '') + ')', 'ok');
       return true;
     } catch (e) {
-      Store.toast('No se pudo generar la imagen: ' + e.message, 'err');
-      Editor.refresh();
+      if (!IA_CANCELADA()) Store.toast('No se pudo generar la imagen: ' + e.message, 'err');
+      Editor.refreshSlide(index);
       return false;
     } finally {
-      placeholder(index, false);
+      placeholder(index, slot, false);
     }
   }
 
-  /** Genera todas en serie (de 3 en 3 para no saturar la cuota). */
-  function all(only) {
-    const deck = App.deck();
-    const targets = deck.slides
-      .map((s, i) => ({ s, i }))
-      .filter(({ s }) => (only ? true : ['cover', 'section', 'image', 'image-full', 'closing'].includes(s.layout)));
+  /* ---------- fotos de internet ---------- */
 
-    if (!targets.length) { Store.toast('No hay diapositivas con imagen en esta presentación.'); return; }
-    if (!Providers.imageReady()) {
+  /** Consulta corta pero descriptiva para buscar la foto de un hueco. */
+  function query(slide, slot) {
+    const proms = Store.slidePrompts(slide);
+    const cand = [proms[slot], slide.title, slide.kicker, (slide.bullets || [])[0]];
+    const q = cand.map(x => String(x || '').trim()).filter(Boolean)[0] || 'abstract background';
+    return q.length > 90 ? q.slice(0, 90) : q;
+  }
+
+  /** Trae una foto real de Wikimedia/Openverse para el hueco indicado. */
+  async function oneWeb(index, slot = 0) {
+    const deck = App.deck();
+    const slide = deck.slides[index];
+    if (!slide) return false;
+    placeholder(index, slot, true);
+    try {
+      const q = query(slide, slot);
+      const lista = await Web.buscar(q, { n: 8 });
+      const res = Web.mejor(lista);
+      if (!res) throw new Error('no encontré fotos para «' + q + '»');
+      const cambiado = await Web.usar(slide, slot, res);
+      Store.toast('Foto añadida (' + (index + 1) + ') · ' + res.source +
+        (cambiado ? ' · pasé a «Galería» para que se vea' : ''), 'ok');
+      return true;
+    } catch (e) {
+      if (!IA_CANCELADA()) Store.toast('No se pudo traer la foto: ' + e.message, 'err');
+      Editor.refreshSlide(index);
+      return false;
+    } finally {
+      placeholder(index, slot, false);
+    }
+  }
+
+  /** Reparte una lista en tandas de "n" para no esperar a una por una. */
+  function enLotes(lista, n, tarea) {
+    let i = 0;
+    const paso = () => {
+      if (i >= lista.length) return Promise.resolve();
+      const trozo = lista.slice(i, i + n);
+      i += trozo.length;
+      return Promise.all(trozo.map(tarea)).then(paso);
+    };
+    return paso();
+  }
+
+  /** Rellena todas las que falten. Con IA, de una en una; fotos de internet, a tres. */
+  function all(only, opts) {
+    opts = opts || {};
+    const web = opts.source === 'web';
+    const deck = App.deck();
+    const targets = [];
+    deck.slides.forEach((s, i) => {
+      if (!only && !CON_IMAGEN.includes(s.layout)) return;
+      const n = Store.imgCount(s);
+      const imgs = Store.slideImages(s);
+      for (let k = 0; k < n; k++) {
+        if (!imgs[k]) targets.push({ i, k });
+      }
+    });
+
+    if (!targets.length) { Store.toast('No hay huecos de imagen que rellenar en esta presentación.'); return; }
+    if (!web && !Providers.imageReady()) {
       Store.toast('Las imágenes necesitan un proveedor: añade una clave en Ajustes o usa Pollinations (gratis sin clave).', 'err');
       return;
     }
@@ -117,39 +180,49 @@ const Images = (() => {
     bar.hidden = false;
     let done = 0;
     let buenas = 0;
-    let yaTenian = 0;
+    nuevaOperacionIA();               // Cancelar detiene toda la cola de imágenes
 
-    queue = targets.reduce((p, { s, i }) => p.then(async () => {
-      if (s.image) { yaTenian++; return; }
+// Las fotos de internet van de tres en tres: buscando no hay clave ni
+    // espera larga, y así una deck de 20 huecos no parece colgada. La
+    // generación con IA sigue una detrás de otra para no machacar al proveedor.
+    const ancho = web ? 3 : 1;
+    queue = enLotes(targets, ancho, ({ i, k }) => {
+      if (IA_CANCELADA()) return Promise.resolve();   // se paró: no seguimos con las que faltan
       $('genProgress').querySelector('.progress-text').textContent =
-        `Generando imágenes… ${done + 1} de ${targets.length}`;
-      const ok = await one(i);
-      if (ok) buenas++;
-      done++;
-    }), Promise.resolve()).then(() => {
+        (web ? 'Buscando fotos… ' : 'Generando imágenes… ') + `${done + 1} de ${targets.length}`;
+      return (web ? oneWeb(i, k) : one(i, k)).then(ok => {
+        if (ok) buenas++;
+        done++;
+      });
+    }).then(() => {
       bar.hidden = true;
       // Cuenta solo lo que de verdad salió: decir "listas 3/3" con tres errores
       // era lo que hacía pensar que la app funcionaba cuando no generó nada.
-      const pedidas = buenas + (done - buenas);
-      if (!buenas) {
-        Store.toast('No se pudo generar ninguna de las ' + pedidas + ' imágenes. Mira el error de arriba.', 'err');
+      const pedidas = targets.length;
+      const cosa = web ? 'fotos' : 'imágenes';
+      if (IA_CANCELADA()) {
+        Store.toast((web ? 'Búsqueda de fotos' : 'Generación de imágenes') +
+          ' cancelada (' + buenas + ' de ' + pedidas + ' listas).', 'warn');
+      } else if (!buenas) {
+        Store.toast('No se pudo ' + (web ? 'traer' : 'generar') + ' ninguna de las ' +
+          pedidas + ' ' + cosa + '. Mira el error de arriba.', 'err');
       } else if (buenas < pedidas) {
-        Store.toast('Imágenes: ' + buenas + ' de ' + pedidas + ' generadas' +
-          (yaTenian ? ' (' + yaTenian + ' ya estaban)' : '') + '. Las demás fallaron; mira el error de arriba.', 'err');
+        Store.toast((web ? 'Fotos: ' : 'Imágenes: ') + buenas + ' de ' + pedidas +
+          (web ? ' traídas' : ' generadas') + '. Las demás fallaron; mira el error de arriba.', 'err');
       } else {
-        Store.toast('Imágenes listas: ' + buenas + '/' + pedidas +
-          (yaTenian ? ' (' + yaTenian + ' ya estaban)' : ''), 'ok');
+        Store.toast((web ? 'Fotos listas: ' : 'Imágenes listas: ') + buenas + '/' + pedidas, 'ok');
       }
     });
   }
 
-  function generate(index) {
+  function generate(index, slot = 0) {
     if (!Providers.imageReady()) {
-      Store.toast('Las imágenes necesitan una clave de Gemini, OpenRouter o Pollinations: añádela en Ajustes.', 'err');
+      Store.toast('Las imágenes necesitan una clave de Gemini, OpenRouter, Hugging Face o AI Horde: añádela en Ajustes.', 'err');
       return;
     }
-    one(index);
+    nuevaOperacionIA();
+    one(index, slot);
   }
 
-  return { one, all, generate, useFile, shrink, aseguraVisible, CON_IMAGEN };
+  return { one, oneWeb, all, generate, useFile, shrink, aseguraVisible, query, CON_IMAGEN };
 })();

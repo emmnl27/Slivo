@@ -22,16 +22,17 @@ const Gemini = (() => {
 
     let res;
     try {
-      res = await fetch(BASE + path, {
+      res = await fetchTimeout(BASE + path, {
         method,
         headers: {
           'x-goog-api-key': key(),
           'Content-Type': 'application/json'
         },
         body: body ? JSON.stringify(body) : undefined
-      });
+      }, IA_TIMEOUT);
     } catch (e) {
-      throw new Error('No se pudo conectar con Google. Revisa tu conexión a internet.');
+      if (esAborto(e)) throw gemError('Google tardó demasiado en responder y se canceló la petición. Vuelve a intentarlo.', true, true);
+      throw gemError('No se pudo conectar con Google. Revisa tu conexión a internet.', true);
     }
 
     const text = await res.text();
@@ -39,9 +40,24 @@ const Gemini = (() => {
     if (text) { try { data = JSON.parse(text); } catch (e) { /* respuesta no JSON */ } }
 
     if (!res.ok) {
-      throw new Error(friendlyError(data, res));
+      /* "retryable" = conviene probar el siguiente proveedor; "reintentar" = repetir
+         la misma llamada. Cuota, saturación y 5xx sí se repiten; clave o modelo mal,
+         no (sería perder el tiempo). Así el asistente cae a OpenRouter/Groq en vez de
+         rendirse cuando Google devuelve 429. */
+      const transitorio = res.status === 429 || res.status === 529 || res.status >= 500;
+      throw gemError(friendlyError(data, res), true, !transitorio);
     }
     return data;
+  }
+
+  /** Error de Gemini con la misma forma que los de Providers: si "retryable" es
+   *  falso, el asistente deja de probar proveedores; si "reintentar" es falso, no
+   *  repite esta misma llamada pero sí deja que la cadena siga. */
+  function gemError(message, retryable, skipRetry) {
+    const e = new Error(message);
+    e.retryable = !!retryable;
+    if (skipRetry) e.reintentar = false;
+    return e;
   }
 
   function friendlyError(data, res) {
@@ -81,7 +97,8 @@ const Gemini = (() => {
   function fail(msg) {
     const e = new Error(msg);
     e.code = 'modelo_invalido';
-    e.retryable = false;
+    e.retryable = true;       // aunque este modelo no valga, otro proveedor puede servir
+    e.reintentar = false;     // no tiene sentido repetir la misma llamada
     throw e;
   }
 
@@ -145,7 +162,7 @@ const Gemini = (() => {
     });
 
     if (data.promptFeedback && data.promptFeedback.blockReason) {
-      throw new Error('La petición fue bloqueada: ' + (data.promptFeedback.blockReason || 'motivo desconocido'));
+      throw gemError('La petición fue bloqueada: ' + (data.promptFeedback.blockReason || 'motivo desconocido'), true, true);
     }
     return data;
   }
@@ -182,10 +199,10 @@ const Gemini = (() => {
       }
     }
     if (data.promptFeedback && data.promptFeedback.blockReason) {
-      throw new Error('Imagen bloqueada por seguridad. Prueba otra descripción.');
+      throw gemError('Imagen bloqueada por seguridad. Prueba otra descripción.', true, true);
     }
-    throw new Error('El modelo ' + mod + ' no devolvió ninguna imagen' +
-      (isImageModel(mod) ? '. Prueba otro en Ajustes.' : ': parece un modelo de texto. Elige uno de la familia Nano Banana en Ajustes.'));
+    throw gemError('El modelo ' + mod + ' no devolvió ninguna imagen' +
+      (isImageModel(mod) ? '. Prueba otro en Ajustes.' : ': parece un modelo de texto. Elige uno de la familia Nano Banana en Ajustes.'), true, true);
   }
 
   return {

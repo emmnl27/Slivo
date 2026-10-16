@@ -1,7 +1,7 @@
 /* ============================================================
    DeckAI · capa de proveedores de IA
    Unifica Gemini con los proveedores de API compatible con OpenAI
-   (OpenRouter, Groq, Mistral, Hugging Face y Ollama) e incluye
+   (OpenRouter, Groq, Mistral, DeepSeek, Hugging Face y Ollama) e incluye
    reintentos y cambio automático de modelo cuando el servicio falla.
    ============================================================ */
 
@@ -26,6 +26,7 @@ const Providers = (() => {
     pollinations: 'https://gen.pollinations.ai/v1',
     groq: 'https://api.groq.com/openai/v1',
     mistral: 'https://api.mistral.ai/v1',
+    deepseek: 'https://api.deepseek.com',
     huggingface: 'https://router.huggingface.co/v1'
   };
   function baseFor(id) { return BASE[id] || ''; }
@@ -109,7 +110,7 @@ const Providers = (() => {
 
   /* ---------- peticiones ---------- */
 
-  async function fetchJson(url, { method = 'GET', body, headers = {}, provider, modelo } = {}) {
+  async function fetchJson(url, { method = 'GET', body, headers = {}, provider, modelo, timeout = IA_TIMEOUT } = {}) {
     const prov = provider || byId(current());
     const h = Object.assign({ 'Content-Type': 'application/json' }, headers);
     if (prov.id === 'openrouter') {
@@ -121,8 +122,11 @@ const Providers = (() => {
 
     let res;
     try {
-      res = await fetch(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+      res = await fetchTimeout(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined }, timeout);
     } catch (e) {
+      if (esAborto(e)) {
+        throw Object.assign(fail(nameOf(prov) + ' tardó demasiado en responder y se canceló. Prueba otro proveedor o reinténtalo.', 'red', true), { timeout: true });
+      }
       if (prov.local) {
         throw fail('No encuentro Ollama en ' + base(prov.id) + '. Instálalo y ejecútalo, o usa otro proveedor.', 'red', false);
       }
@@ -171,6 +175,7 @@ const Providers = (() => {
 
     const body = { model: model(id), messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
     if (temperature != null) body.temperature = temperature;
+    if (prov.maxTokens) body.max_tokens = prov.maxTokens;
     if (schema) body.response_format = { type: 'json_object' };
     const data = await fetchJson(base(id) + '/chat/completions', {
       method: 'POST', body, provider: prov, modelo: model(id)
@@ -179,6 +184,13 @@ const Providers = (() => {
   }
 
   /* ---------- cadena de modelos de reserva ---------- */
+
+  /* Modelos que la propia API confirmó al pulsar "Ver modelos". El catálogo de
+     CONFIG son sugerencias y pueden haber caducado; los reales mandan. */
+  const modelosVivos = {};
+  function recordarModelos(id, lista) {
+    modelosVivos[id] = (lista || []).map(m => typeof m === 'string' ? m : (m && m.id)).filter(Boolean).slice(0, 40);
+  }
 
   /**
    * Orden de intento: el proveedor elegido, después el resto de proveedores que
@@ -200,7 +212,13 @@ const Providers = (() => {
     if (!s.autoRetry) return lista;
 
     CONFIG.providers.forEach(p => meter(p.id, model(p.id)));
-    (CONFIG.models[prio] || []).slice(0, 4).forEach(m => meter(prio, m.id));
+
+    // reservas del proveedor elegido: primero los modelos que la API confirmó
+    // ("Ver modelos"), y solo después las sugerencias del catálogo
+    const vivos = modelosVivos[prio] || [];
+    vivos.slice(0, 6).forEach(m => meter(prio, m));
+    const setVivos = new Set(vivos);
+    (CONFIG.models[prio] || []).filter(m => !setVivos.has(m.id)).slice(0, 4).forEach(m => meter(prio, m.id));
     return lista;
   }
 
@@ -210,7 +228,8 @@ const Providers = (() => {
       try { return await fn(); }
       catch (e) {
         ultimo = e;
-        if (!e.retryable || i === intentos) break;
+        // no se repite la misma llamada si es un timeout o un fallo determinista
+        if (!e.retryable || e.timeout || e.reintentar === false || i === intentos) break;
         await sleep(700 * i);
       }
     }
@@ -458,8 +477,15 @@ const Providers = (() => {
       throw fail('No hay ningún proveedor listo. Abre Ajustes y pega una clave (o usa Ollama en local).', 'clave', false);
     }
 
+    /* Aunque cada petición tenga su propio timeout, la cadena puede encadenar
+       varios proveedores lentos. Este tope corta la espera total para que el
+       asistente siempre responda (con error o con resultado) en un tiempo finito. */
+    const t0 = Date.now();
+    const BUDGET = 120000;                       // 2 minutos como máximo
+
     const errores = [];
     for (const c of candidatos) {
+      if (Date.now() - t0 > BUDGET) break;
       try {
         const plano = await conReintentos(async () => {
           const t = await ask(c.provider, { system, user, temperature });
@@ -469,6 +495,7 @@ const Providers = (() => {
         if (plano && typeof plano === 'object') return { data: plano, usado: c, errores };
 
         // el modelo se enrolló con texto: se le pide solo JSON
+        if (Date.now() - t0 > BUDGET) throw fail('Se agotó el tiempo de espera.', 'agotado', false);
         const solo = await ask(c.provider, {
           system: system + '\nIMPORTANTE: responde EXCLUSIVAMENTE con un objeto JSON válido, sin texto antes ni después.',
           user, temperature
@@ -480,7 +507,9 @@ const Providers = (() => {
         throw fail('La respuesta no contenía JSON', 'contenido', true);
       } catch (e) {
         errores.push(nameOf(byId(c.provider)) + ' · ' + c.model + ': ' + e.message);
-        if (!e.retryable) break;
+        // seguimos con el siguiente proveedor salvo que el usuario haya desactivado
+        // el cambio automático o ya hayamos probado unos cuantos
+        if (settings().autoRetry === false) break;
         if (errores.length >= 3) break;
       }
     }
@@ -495,8 +524,9 @@ const Providers = (() => {
     cover: 'kicker, subtitle, author, date',
     section: 'subtitle',
     'image-full': 'subtitle',
-    agenda: 'bullets', bullets: 'bullets', image: 'bullets',
-    'two-col': 'columns', stats: 'stats', timeline: 'steps', quote: 'quote'
+    agenda: 'bullets', bullets: 'bullets', image: 'bullets', checklist: 'bullets',
+    'two-col': 'columns', stats: 'stats', bars: 'stats', timeline: 'steps', quote: 'quote',
+    table: 'tcols, trows', cards: 'cards'
   };
 
   const txt = v => (typeof v === 'string' ? v.trim() : '');
@@ -504,15 +534,40 @@ const Providers = (() => {
   /** ¿A esta diapositiva le falta todo el cuerpo que pide su layout? */
   function sinContenido(s) {
     switch (s.layout) {
-      case 'agenda': case 'bullets': case 'image': return !s.bullets.length;
+      case 'agenda': case 'bullets': case 'image': case 'checklist': return !s.bullets.length;
       case 'two-col': return !s.columns.length;
-      case 'stats': return !s.stats.length;
+      case 'stats': case 'bars': return !s.stats.length;
       case 'timeline': return !s.steps.length;
+      case 'table': return !(s.tcols.length || s.trows.length);
+      case 'cards': return !s.cards.length;
       case 'quote': return !txt(s.quote);
-      case 'cover': return !(txt(s.kicker) || txt(s.subtitle) || txt(s.author) || txt(s.date) || s.image);
-      case 'section': case 'image-full': return !(txt(s.kicker) || txt(s.subtitle) || s.image);
+      case 'cover': return !(txt(s.kicker) || txt(s.subtitle) || txt(s.author) || txt(s.date) || Store.slideImages(s).some(Boolean));
+      case 'section': case 'image-full': case 'gallery': return !(txt(s.kicker) || txt(s.subtitle) || Store.slideImages(s).some(Boolean));
       default: return false;                  // closing: el título y el bloque de contacto ya la llenan
     }
+  }
+
+  const palabras = t => String(t || '').trim().split(/\s+/).filter(Boolean).length;
+
+  /* Por debajo de este número de palabras la diapositiva es un esqueleto:
+     el modelo se quedó sin contenido aunque technicalmente "llenó" el campo. */
+  const MIN_PALABRAS = { ligero: 6, normal: 10, detallado: 16 };
+
+  /** ¿Tiene contenido pero es una lista de palabras sueltas? */
+  function escasa(s, form) {
+    const cuerpo = {
+      bullets: () => s.bullets.join(' '),
+      checklist: () => s.bullets.join(' '),
+      image: () => s.bullets.join(' '),
+      'two-col': () => s.columns.map(c => (c.items || []).join(' ')).join(' '),
+      timeline: () => s.steps.map(x => x.text).join(' '),
+      bars: () => s.stats.map(x => (x.label || '') + ' ' + (x.value || '')).join(' '),
+      table: () => s.tcols.join(' ') + ' ' + s.trows.map(r => r.join(' ')).join(' '),
+      cards: () => s.cards.map(c => (c.heading || '') + ' ' + (c.text || '')).join(' ')
+    }[s.layout];
+    if (!cuerpo) return false;              // agenda y stats son de por sí breves
+    if (sinContenido(s)) return true;
+    return palabras(cuerpo()) < (MIN_PALABRAS[(form && form.density) || 'normal'] || 10);
   }
 
   const NUM = ['n', 'num', 'numero', 'index', 'indice', 'posicion', 'slide'];
@@ -522,40 +577,49 @@ const Providers = (() => {
   const mismoTitulo = (x, s) => clave(x.title || x.titulo) === clave(s.title) && clave(s.title) !== '';
 
   /**
-   * Si la IA devolvió diapositivas solo con el título, se le pide el contenido
-   * que falta en una sola llamada extra. Es la causa más frecuente de
-   * presentaciones "vacías" cuando responde un modelo pequeño o cuando se
-   * respeta el esquema pero el modelo se salta los campos de contenido.
+   * Si la IA devolvió diapositivas solo con el título —o con el contenido
+   * escueto, cuatro palabras por viñeta— se le pide que lo escriba de verdad en
+   * una sola llamada extra. Es la causa más frecuente de presentaciones
+   * "vacías" cuando responde un modelo pequeño o cuando se respeta el esquema
+   * pero el modelo se salta los campos de contenido.
    */
   async function cerrar(deck, c, errores, form) {
     const out = Object.assign({}, deck, { _usado: c, _errores: errores });
 
     const normal = Store.normalizeDeck(deck);
-    const huecos = normal.slides.map((s, i) => ({ s, i })).filter(({ s }) => sinContenido(s));
+    const flojas = normal.slides.map((s, i) => ({ s, i }))
+      .filter(({ s }) => sinContenido(s) || escasa(s, form));
     out._reparadas = 0;
     out._vacias = 0;
-    if (!huecos.length) return out;
+    if (!flojas.length) return out;
 
-    const lista = huecos.map(({ s, i }) =>
-      `{"n":${i + 1},"layout":"${s.layout}","titulo":${JSON.stringify(s.title)}}`).join(', ');
+    const d = DENSIDADES[(form && form.density) || 'normal'] || DENSIDADES.normal;
 
-    const formatos = [...new Set(huecos.map(({ s }) => s.layout))]
+    const lista = flojas.map(({ s, i }) =>
+      `{"n":${i + 1},"layout":"${s.layout}","titulo":${JSON.stringify(s.title)},"motivo":"${sinContenido(s) ? 'vacio' : 'corta'}"`).join(', ');
+
+    const formatos = [...new Set(flojas.map(({ s }) => s.layout))]
       .map(l => `- layout "${l}": ${CLAVES[l] || 'subtitle'}`).join('\n');
 
     const user = [
-      'Una presentación se quedó con los títulos pero sin el contenido de estas diapositivas:',
+      'Una presentación se quedó sin contenido, o con el contenido demasiado escueto, en estas diapositivas:',
       '[' + lista + ']',
       '',
-      'Escribe SOLO el contenido que falta de cada una y devuélvelo en este JSON:',
-      '{"slides":[{"n":1,"layout":"bullets","bullets":["...","...","..."]}]}',
+      'Escribe el contenido de cada una, ya desarrollado, y devuélvelo en este JSON:',
+      '{"slides":[{"n":1,"layout":"bullets","bullets":["Frase completa con la idea y su consecuencia.","Frase completa."]}]}',
       '',
       'Reglas:',
       '- Mantén el número "n" y el "layout" de cada diapositiva tal cual aparecen arriba.',
-      '- Usa 3 a 5 elementos cortos por diapositiva, en el mismo idioma y nivel de detalle.',
+      '- Escribe con el mismo nivel de detalle que el resto de la presentación: ' + d.bullets +
+      ' elementos de ' + d.palabras + ' por diapositiva.',
+      '- No valen palabras sueltas: cada elemento es una frase completa que se entienda sola.',
+      '- Mantén y mejora los títulos que ya hay, salvo que sean claramente incorrectos.',
       '- Campos que espera cada layout:',
       formatos,
-      '- Si el layout es "two-col" usa "columns":[{heading,items[]}]; si es "stats" usa "stats":[{value,label}];',
-      '  si es "timeline" usa "steps":[{title,text}]; si es "quote" usa "quote" y "quoteAuthor".',
+      '- Si el layout es "two-col" usa "columns":[{heading,items[]}]; si es "stats" o "bars" usa "stats":[{value,label}];',
+      '  si es "timeline" usa "steps":[{title,text}]; si es "quote" usa "quote" y "quoteAuthor";',
+      '  si es "table" usa "tcols":[] y "trows":[[]]; si es "cards" usa "cards":[{heading,text}];',
+      '  si es "checklist" usa "bullets" con requisitos verificables.',
       '- Devuelve un objeto por cada "n" de la lista, en el mismo orden, y solo JSON.'
     ].join('\n');
 
@@ -572,7 +636,7 @@ const Providers = (() => {
         if (!porN.size && !sueltos.length) continue;
 
         let fijadas = 0;
-        for (const { s, i } of huecos) {
+        for (const { s, i } of flojas) {
           let x = porN.get(i + 1);
           if (!x) x = sueltos.find(y => mismoTitulo(y, s));
           if (!x) x = sueltos.shift();              // el modelo no numeró: se empareja por orden
@@ -581,22 +645,24 @@ const Providers = (() => {
           const fundido = Object.assign({}, deck.slides[i], x, { layout: s.layout, id: s.id });
           NUM.forEach(k => { delete fundido[k]; });
           const norm = Store.normalizeDeck({ slides: [fundido] }).slides[0];
-          norm.image = s.image || norm.image;            // no se pisa una imagen existente
-          norm.imagePrompt = s.imagePrompt || norm.imagePrompt;
+          norm.images = Store.slideImages(s);            // no se pisa una imagen existente
+          norm.imagePrompts = Store.slidePrompts(s);
+          norm.imgCount = Store.imgCount(s);
           norm.notes = s.notes || norm.notes;
           normal.slides[i] = norm;
-          if (!sinContenido(norm)) fijadas++;
+          if (!sinContenido(norm) && !escasa(norm, form)) fijadas++;
         }
         if (fijadas) {
           Object.assign(out, normal, { _usado: c, _errores: errores, _reparadas: fijadas });
+          break;                       // ya reparado: no hace falta otro proveedor
         }
-        break;
+        // este proveedor no rellenó nada: se prueba el siguiente
       } catch (e) {
         errores.push('Reparación con ' + nameOf(byId(alt.provider)) + ': ' + e.message);
-        break;
+        // fallo puntual: se intenta con el siguiente proveedor en vez de rendirse
       }
     }
-    if (out.slides) out._vacias = Store.normalizeDeck(out).slides.filter(sinContenido).length;
+    out._vacias = Store.normalizeDeck(out).slides.filter(s => sinContenido(s) || escasa(s, form)).length;
     return out;
   }
 
@@ -640,7 +706,7 @@ const Providers = (() => {
         return raw;
       } catch (e) {
         errores.push(nameOf(byId(c.provider)) + ' · ' + c.model + ': ' + e.message);
-        if (!e.retryable || errores.length >= 3) break;
+        if (settings().autoRetry === false || errores.length >= 3) break;
       }
     }
     throw fail('No se pudo rehacer la diapositiva. ' + (errores[errores.length - 1] || ''), 'agotado', false);
@@ -803,8 +869,9 @@ const Providers = (() => {
 
     let resp;
     try {
-      resp = await fetch(raiz + '/generate/async', { method: 'POST', headers: cab, body: JSON.stringify(cuerpo) });
+      resp = await fetchTimeout(raiz + '/generate/async', { method: 'POST', headers: cab, body: JSON.stringify(cuerpo) }, IA_IMG_TIMEOUT);
     } catch (e) {
+      if (esAborto(e)) throw Object.assign(fail('AI Horde tardó demasiado en aceptar el trabajo. Prueba otra vez.', 'red', true), { timeout: true });
       throw fail('No pude conectar con AI Horde. Revisa tu conexión a internet.', 'red', true);
     }
     if (!resp.ok) {
@@ -826,7 +893,7 @@ const Providers = (() => {
     let ver;
     while (Date.now() - t0 < 180000) {
       await sleep(2500);
-      try { ver = await (await fetch(raiz + '/generate/check/' + job.id, { headers: cab })).json(); }
+      try { ver = await (await fetchTimeout(raiz + '/generate/check/' + job.id, { headers: cab }, 20000)).json(); }
       catch (e) { continue; }                     // fallo puntual de red: se reintenta el sondeo
       if (ver && (ver.done || ver.faulted)) break;
     }
@@ -836,7 +903,7 @@ const Providers = (() => {
     }
 
     let st;
-    try { st = await (await fetch(raiz + '/generate/status/' + job.id, { headers: cab })).json(); }
+    try { st = await (await fetchTimeout(raiz + '/generate/status/' + job.id, { headers: cab }, 30000)).json(); }
     catch (e) { throw fail('No pude recoger la imagen de AI Horde.', 'red', true); }
     const gen = ((st && st.generations) || [])[0];
     if (!gen || !gen.img) throw fail('AI Horde no devolvió ninguna imagen.', 'contenido', true);
@@ -883,12 +950,13 @@ const Providers = (() => {
         const cab = key(id) ? { Authorization: 'Bearer ' + key(id) } : {};
         let resp;
         try {
-          resp = await fetch(url, { headers: cab, referrerPolicy: 'no-referrer' });
+          resp = await fetchTimeout(url, { headers: cab, referrerPolicy: 'no-referrer' }, IA_IMG_TIMEOUT);
         } catch (e) {
-          if (intent < 2) {
+          if (intent < 2 && !esAborto(e)) {
             await new Promise(r => setTimeout(r, 250 * (intent + 1)));
             return pedir(intent + 1, mdl, withFlags);
           }
+          if (esAborto(e)) throw Object.assign(fail('Pollinations tardó demasiado y se canceló.', 'red', true), { timeout: true });
           throw fail('No se pudo contactar con Pollinations.', 'red', true);
         }
         if (!resp.ok) {
@@ -942,13 +1010,14 @@ const Providers = (() => {
       const pedir = async cuerpo => {
         let resp;
         try {
-          resp = await fetch(ruta, {
+          resp = await fetchTimeout(ruta, {
             method: 'POST',
             headers: Object.assign({ 'Content-Type': 'application/json' },
               key(id) ? { Authorization: 'Bearer ' + key(id) } : {}),
             body: JSON.stringify(cuerpo)
-          });
+          }, IA_IMG_TIMEOUT);
         } catch (e) {
+          if (esAborto(e)) throw Object.assign(fail(nameOf(prov) + ' tardó demasiado en generar la imagen y se canceló.', 'red', true), { timeout: true });
           throw fail('No pude conectar con ' + nameOf(prov) + '. Revisa tu conexión a internet.', 'red', true);
         }
         if (!resp.ok) {
@@ -963,7 +1032,7 @@ const Providers = (() => {
         if (/json|text/.test(tipo)) {
           const j = await resp.json().catch(() => ({}));
           if (j.data && j.data[0] && j.data[0].b64_json) return 'data:image/png;base64,' + j.data[0].b64_json;
-          if (Array.isArray(j.output) && j.output[0]) return await blobADataUrl(await (await fetch(j.output[0])).blob());
+          if (Array.isArray(j.output) && j.output[0]) return await blobADataUrl(await (await fetchTimeout(j.output[0], {}, IA_IMG_TIMEOUT)).blob());
           if (j.error) throw fail('Hugging Face: ' + j.error, 'contenido', true);
           throw fail('Hugging Face no devolvió ninguna imagen.', 'contenido', true);
         }
@@ -1004,7 +1073,7 @@ const Providers = (() => {
 
     const ruta = base(id) + (prov.imagePath || '/images/generations');
     try {
-      const data = await fetchJson(ruta, { method: 'POST', body: completo, provider: prov, modelo: modelo });
+      const data = await fetchJson(ruta, { method: 'POST', body: completo, provider: prov, modelo: modelo, timeout: IA_IMG_TIMEOUT });
       const url = aDataUrl(data);
       if (url) return url;
       throw fail('El modelo ' + modelo + ' (' + nameOf(prov) + ') no devolvió ninguna imagen.', 'contenido', true);
@@ -1012,7 +1081,7 @@ const Providers = (() => {
       // 400 por parámetros no admitidos → segunda vuelta con el cuerpo mínimo
       const porParams = e.kind === 'red' && /400|parameter|aspect_ratio|size|quality|unsupported/i.test(e.message);
       if (!porParams || completo === minimo) throw e;
-      const data = await fetchJson(ruta, { method: 'POST', body: minimo, provider: prov, modelo: modelo });
+      const data = await fetchJson(ruta, { method: 'POST', body: minimo, provider: prov, modelo: modelo, timeout: IA_IMG_TIMEOUT });
       const url = aDataUrl(data);
       if (url) return url;
       throw fail('El modelo ' + modelo + ' (' + nameOf(prov) + ') no devolvió ninguna imagen.', 'contenido', true);
@@ -1044,7 +1113,7 @@ const Providers = (() => {
       } catch (e) {
         ultimo = e;
         errores.push(nameOf(byId(c.provider)) + ' · ' + c.model + ' → ' + e.message);
-        if (!e.retryable) break;
+        if (settings().autoRetry === false) break;
       }
     }
     const partes = [];
@@ -1204,6 +1273,7 @@ const Providers = (() => {
     equipoSize: () => equipoDe(chain()).length,
     imageProvider, imageModel, imageProviders, imageCatalogo, imageChain, imageReady,
     createDeck, redoSlide, askJson, image, listModels, listImageModels, generarImagen, checkKey,
+    recordarModelos, sinContenido, escasa,
     textoProviders: () => CONFIG.providers.filter(p => !p.soloImagen)
   };
 })();

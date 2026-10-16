@@ -55,11 +55,12 @@ generación falla con `401`, el problema ya no es la clave: es la cuenta o el mo
 | **OpenRouter** | `qwen/qwen3.8-27b:free` | [openrouter.ai/keys](https://openrouter.ai/keys) | Una sola clave da acceso a 400+ modelos; los que acaban en `:free` no cuestan nada |
 | **Groq** | `llama-3.3-70b-versatile` | [console.groq.com/keys](https://console.groq.com/keys) | Plan gratuito generoso y la latencia más baja |
 | **Mistral** | `mistral-small-latest` | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | Modelos europeos, gratuitos y muy rápidos |
+| **DeepSeek** | `deepseek-chat` | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) | Muy barato y bueno escribiendo; se pide el máximo de tokens (8192) para que quepan presentaciones largas |
 | **Hugging Face** | (a elegir) | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) | Miles de modelos abiertos con un token de inferencia |
 | **Pollinations** | `openai/gpt-5.4-nano` | [enter.pollinations.ai](https://enter.pollinations.ai) | Agrega GPT, Claude, Grok y Qwen; al registrarse te dan Pollen para probar |
 | **Ollama** | `llama3.2` | no hace falta | Se ejecuta en tu equipo, sin internet y sin coste |
 
-OpenRouter, Pollinations, Groq, Mistral, Hugging Face y Ollama usan una API **compatible con OpenAI**, así que
+OpenRouter, Pollinations, Groq, Mistral, DeepSeek, Hugging Face y Ollama usan una API **compatible con OpenAI**, así que
 comparten el mismo cliente (`assets/js/providers.js`). El botón **Ver modelos** de Ajustes consulta la lista real
 de modelos de cada proveedor y la muestra en el desplegable.
 
@@ -240,15 +241,21 @@ Para usarlo desde otro equipo tendrías que cambiar la URL en `assets/js/config.
 
 **Generación**
 - Tema libre, número de diapositivas (3–40), idioma, público, tono y estilo.
+- **Cantidad de texto**: en *Más opciones* eliges si quieres diapositivas **ligeras** (solo ideas), **normales**
+  (frases completas) o **detalladas** (cada idea con su ejemplo o cifra). Es lo que evita las presentaciones
+  esqueletas de cuatro palabras por viñeta.
 - Salida en JSON estructurado: portada, índice, secciones, listas, comparaciones, datos, cronologías, citas y cierre.
-- Si la IA devuelve alguna diapositiva **solo con el título**, la app detecta los huecos y pide el contenido que
-  falta en una única llamada extra, sin repetir el resto de la presentación.
+- Si la IA devuelve alguna diapositiva **solo con el título** —o con el contenido demasiado escueto—, la app lo
+  detecta y pide el contenido de verdad en una única llamada extra, sin repetir el resto de la presentación.
 - **Rehacer con IA** en cualquier diapositiva concreta.
 - Notas del orador generadas para cada diapositiva.
 
 **Diseño**
-- 8 temas: `aurora`, `minimal`, `corporate`, `sunset`, `forest`, `mono`, `neon`, `ocean`.
-- 11 layouts: portada, sección, índice, viñetas, dos columnas, imagen, imagen a sangre, datos, cronología, cita y cierre.
+- 8 temas integrados: `aurora`, `minimal`, `corporate`, `sunset`, `forest`, `mono`, `neon`, `ocean`, más
+  **temas propios**: elige colores, degradado de fondo y fuentes, y guárdalos para todas tus presentaciones.
+- 16 layouts: portada, sección, índice, viñetas, dos columnas, imagen, imagen a sangre, **galería**, datos,
+  **gráfico de barras**, **tabla**, **verificación**, **tarjetas**, proceso, cita y cierre. La IA alterna entre ellos
+  para que la presentación no sea todo viñetas; también los cambias a mano o se los pides al asistente.
 - El tamaño de letra se adapta solo si el texto es más largo de lo previsto, para que nada se salga de la diapositiva.
 - Diapositivas de 1280×720 (16:9) escaladas al panel, con el mismo aspecto en pantalla, PDF y PPTX.
 
@@ -259,13 +266,25 @@ Para usarlo desde otro equipo tendrías que cambiar la URL en `assets/js/config.
 - Los modelos que no cuestan nada van agrupados bajo **GRATIS**, con AI Horde sin clave, Stable Diffusion 3 en
   Hugging Face y tres de OpenRouter.
 - Cambio automático entre proveedores de imagen si el elegido falla o se queda sin saldo.
-- **Subir tus propias imágenes** de tres maneras, en cualquier diapositiva:
-  - el botón **Subir imagen** del inspector;
-  - arrastrando el archivo desde el escritorio hasta la diapositiva;
-  - con un clic en el hueco punteado de los layouts *Imagen* e *Imagen a sangre*.
+- **Varios huecos de imagen por diapositiva**: el selector 1-4 del inspector decide cuántas imágenes muestra la
+  diapositiva, cada una con su propio hueco y su propio prompt. El layout *Galería* las reparte en rejilla.
+- **Subir tus propias imágenes** de tres maneras, en cualquier hueco:
+  - el botón **Subir** del inspector (un juego por hueco);
+  - arrastrando el archivo desde el escritorio hasta el hueco que quieras;
+  - con un clic en el hueco punteado de los layouts *Imagen*, *Imagen a sangre* y *Galería*.
 - Si el layout actual no tiene hueco para la imagen (viñetas, índice, datos…), al subirla pasa automáticamente a
-  *Imagen + texto* para que se vea, y avisa de ello.
+  *Galería* para que se vea, y avisa de ello.
 - Compresión automática a JPEG ligero antes de generar el PPTX.
+- **Fotos de internet**: además de generar, puedes buscar fotos reales con licencia libre en **Wikimedia Commons** y
+  **Openverse** (sin clave). El botón **Fotos de internet** de la barra rellena los huecos vacíos con el tema de cada
+  diapositiva, y el botón **Buscar** del inspector abre un buscador para elegir la foto a mano. La imagen se guarda
+  dentro de la presentación y se anota su autoría y licencia.
+
+**Iconos**
+- Iconos vectoriales de **Iconify** (Material, Lucide, Phosphor, Tabler, Font Awesome…), sin clave ni registro.
+- Se eligen con el botón **Icono** de cada punto, dato o paso en el inspector, y se guardan dentro de la presentación
+  (no hace falta internet para verlos).
+- Se pintan con el color de acento del tema y se adaptan al tamaño del layout: viñetas, datos, pasos y agenda.
 
 **Edición**
 - Clic sobre cualquier texto para editarlo directamente.
@@ -280,6 +299,9 @@ Para usarlo desde otro equipo tendrías que cambiar la URL en `assets/js/config.
 - Cada respuesta dice qué ha tocado con etiquetas y trae su propio botón **deshacer**; también `Ctrl/⌘ + Alt + Z`.
 - Mantiene la conversación (con el contexto de las últimas 6 interventions) y la guarda en el navegador.
 - Si pides una imagen y no hay ninguna clave de proveedor de imagen, deja guardada la descripción para generarla después.
+- También entiende las fotos de internet: «pon una foto de la web de un cohete» las busca en Wikimedia Commons u
+  Openverse (sin clave, en segundos) y las coloca en los huecos; con «en todas» las reparte por la presentación.
+  Si lo que quieres es una imagen generada, dilo explícitamente («genera una imagen de…»).
 - Si no hay ninguna clave de IA configurada, te dice que la añadas en Ajustes en lugar de fallar en silencio.
 
 **Presentación**
@@ -384,6 +406,7 @@ Los modelos marcados con `:free` no cuestan nada, así que son la opción más s
 
 En Groq: `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`, `llama-3.1-8b-instant`, `qwen/qwen3-32b`.
 En Mistral: `mistral-small-latest`, `mistral-large-latest`, `ministral-8b-latest`, `open-mistral-nemo`.
+En DeepSeek: `deepseek-chat` (respeta el JSON), `deepseek-reasoner` (razona más pero a veces se sale del esquema).
 En Ollama: `llama3.2`, `qwen2.5`, `gemma3`, `mistral` (los que tengas descargados).
 
 ### Modelos de imagen
@@ -482,3 +505,27 @@ detalles:
   retoque visual fino («más elegante», «cambia el color»), conviene concretarlo («pásala a dos columnas», «tema
   corporativo»). Aun así, cada cambio se puede deshacer.
 - Si la IA interpreta mal una petición, el botón **deshacer** del mensaje devuelve la presentación a como estaba.
+
+---
+
+## Pruebas
+
+Las pruebas automaticas viven en `tests/` y se ejecutan contra un navegador real (Brave o Chrome) en modo
+headless. Cada fichero `tests/t-*.js` es una comprobacion; `tests/run.ps1` la carga y muestra el resultado.
+
+```powershell
+# Todas las pruebas
+powershell -ExecutionPolicy Bypass -File tests\run.ps1
+
+# Una sola (por nombre de fichero)
+powershell -ExecutionPolicy Bypass -File tests\run.ps1 -TestName t-design.js
+
+# Con un navegador concreto
+powershell -ExecutionPolicy Bypass -File tests\run.ps1 -Browser "C:\ruta\chrome.exe"
+```
+
+Cubren el diseno de las diapositivas, la cadena de proveedores, las imagenes, el guardado con IndexedDB, la
+cancelacion, el render incremental, el deshacer, la exportacion a PPTX/JSON, los **iconos** de Iconify, las
+**fotos de internet** (Wikimedia/Openverse) pedidas al asistente, la **cantidad de texto** generada y la
+reparacion de diapositivas demasiado cortas, los **4 layouts nuevos** (barras, tabla, verificación y tarjetas),
+el proveedor **DeepSeek** (endpoint, `max_tokens` y clave) y los errores explicados.

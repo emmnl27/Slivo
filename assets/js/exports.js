@@ -12,7 +12,7 @@ const Exports = (() => {
   const hex = c => String(c || '#000000').replace('#', '').slice(0, 6).toUpperCase();
   const clean = s => String(s || '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|[\s(])\*([^*]+)\*/g, '$1$2').trim();
 
-  function themeOf(id) { return THEMES.find(t => t.id === id) || THEMES[0]; }
+  function themeOf(id) { return Store.themeById(id); }
 
   const FONT = 'Segoe UI';
   const FONT_ALT = 'Georgia';
@@ -38,6 +38,39 @@ const Exports = (() => {
   }
 
   /* ---------------- PowerPoint ---------------- */
+
+  /** Convierte un linear-gradient CSS (de colores hex) en un PNG 1280x720.
+      PptxGenJS no entiende degradados, así que se pintan en un lienzo y se usan
+      como fondo de la diapositiva. Devuelve null si el CSS no es un degradado. */
+  function gradientBg(cssBg) {
+    const m = /linear-gradient\(([^)]+)\)/i.exec(String(cssBg || ''));
+    if (!m || typeof document === 'undefined') return null;
+
+    const parts = m[1].split(',').map(s => s.trim()).filter(Boolean);
+    let angle = 180;                                  // por defecto, de arriba abajo
+    if (/^-?\d+(\.\d+)?deg$/i.test(parts[0])) angle = parseFloat(parts.shift());
+
+    const stops = [];
+    for (const p of parts) {
+      const hit = /^(#[0-9a-fA-F]{3,8})(?:\s+(\d+(?:\.\d+)?)%)?$/.exec(p);
+      if (!hit) return null;                          // rgba() u otro formato: mejor color plano
+      stops.push({ color: hit[1], at: hit[2] != null ? parseFloat(hit[2]) / 100 : null });
+    }
+    if (stops.length < 2) return null;
+    stops.forEach((s, i) => { if (s.at == null) s.at = i / (stops.length - 1); });
+
+    const c = document.createElement('canvas');
+    c.width = 1280; c.height = 720;
+    const ctx = c.getContext('2d');
+    const rad = (angle - 90) * Math.PI / 180;
+    const len = Math.abs(1280 * Math.cos(rad)) + Math.abs(720 * Math.sin(rad));
+    const dx = Math.cos(rad) * len / 2, dy = Math.sin(rad) * len / 2;
+    const g = ctx.createLinearGradient(640 - dx, 360 - dy, 640 + dx, 360 + dy);
+    stops.forEach(s => g.addColorStop(Math.max(0, Math.min(1, s.at)), s.color));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 1280, 720);
+    try { return c.toDataURL('image/png').replace(/^data:/, ''); } catch (e) { return null; }
+  }
 
   function pptx() {
     const deck = App.deck();
@@ -68,12 +101,14 @@ const Exports = (() => {
 
     deck.slides.forEach((sl, index) => {
       const s = doc.addSlide();
-      s.background = { color: C.bg };
+      const fondoDeg = gradientBg(t.css['--bg']);
+      s.background = fondoDeg ? { data: fondoDeg } : { color: C.bg };
       if (sl.notes) s.addNotes(clean(sl.notes));
 
       switch (sl.layout) {
         case 'cover': {
-          if (sl.image) addImage(s, sl.image, 0, 0, IN(1280), IN(720));
+          const im0 = Store.slideImages(sl)[0];
+          if (im0) addImage(s, im0, 0, 0, IN(1280), IN(720));
           const k = sl.kicker ? add(s, sl.kicker, { x: IN(78), y: IN(250), w: IN(1000), h: IN(30), fontSize: PT(17), bold: true, color: C.accent, charSpacing: 3 }) : null;
           add(s, sl.title || deck.title, { x: IN(78), y: k ? IN(288) : IN(250), w: IN(1000), h: IN(140), fontSize: PT(70), bold: true, color: C.fg, fontFace: serif ? FONT_ALT : FONT });
           if (sl.subtitle || deck.subtitle) add(s, sl.subtitle || deck.subtitle, { x: IN(78), y: IN(440), w: IN(950), h: IN(70), fontSize: PT(28), color: C.muted });
@@ -123,16 +158,24 @@ const Exports = (() => {
         case 'image':
         case 'image-full': {
           const full = sl.layout === 'image-full';
-          if (sl.image) {
-            if (full) addImage(s, sl.image, 0, 0, IN(1280), IN(720));
-            else addImage(s, sl.image, IN(662), IN(64), IN(540), IN(592));
+          const list = Store.slideImages(sl).slice(0, Store.imgCount(sl));
+          if (list.some(Boolean)) {
+            if (full) addImageGrid(s, list, 0, 0, IN(1280), IN(720));
+            else addImageGrid(s, list, IN(662), IN(64), IN(540), IN(592));
           }
-          const tx = full ? 78 : 78;
+          const tx = 78;
           const tw = full ? 900 : 540;
           if (sl.kicker) add(s, sl.kicker, { x: IN(tx), y: IN(full ? 380 : 110), w: IN(tw), h: IN(30), fontSize: PT(17), bold: true, color: full ? 'FFFFFF' : C.accent, charSpacing: 3 });
           add(s, sl.title, { x: IN(tx), y: IN(full ? 410 : 146), w: IN(tw), h: IN(90), fontSize: PT(42), bold: true, color: full ? 'FFFFFF' : C.fg, fontFace: serif ? FONT_ALT : FONT });
           if (!full) bullets(s, sl.bullets, { x: IN(tx), y: IN(250), w: IN(tw), h: IN(360), size: 21, color: C.fg });
           if (full && sl.subtitle) add(s, sl.subtitle, { x: IN(tx), y: IN(505), w: IN(tw), h: IN(60), fontSize: PT(24), color: 'DDDDDD' });
+          break;
+        }
+
+        case 'gallery': {
+          header(s, sl, C, serif);
+          if (sl.subtitle) add(s, sl.subtitle, { x: IN(78), y: IN(198), w: IN(1124), h: IN(36), fontSize: PT(22), color: C.muted });
+          addImageGrid(s, Store.slideImages(sl).slice(0, Store.imgCount(sl)), IN(78), IN(240), IN(1124), IN(400));
           break;
         }
 
@@ -146,6 +189,78 @@ const Exports = (() => {
             s.addShape('roundRect', { x: IN(x), y: IN(260), w: IN(w), h: IN(300), fill: { color: C.bg, transparency: 84 }, line: { color: C.muted, width: 0.75 }, rectRadius: 0.08 });
             add(s, st.value, { x: IN(x + 12), y: IN(310), w: IN(w - 24), h: IN(90), fontSize: PT(58), bold: true, color: i % 2 ? C.accent2 : C.accent, align: 'center' });
             add(s, st.label, { x: IN(x + 16), y: IN(410), w: IN(w - 32), h: IN(120), fontSize: PT(20), color: C.muted, align: 'center' });
+          });
+          break;
+        }
+
+        case 'bars': {
+          header(s, sl, C, serif);
+          const items = sl.stats.slice(0, 5);
+          const nums = items.map(x => {
+            const m = /-?[\d]+(?:[.,][\d]+)?/.exec(String(x.value || '').replace(/\s/g, ''));
+            let f = 0;
+            if (m) {
+              const n = m[0];
+              f = parseFloat(n.indexOf(',') >= 0 && n.indexOf('.') < 0 ? n.replace(',', '.') : n.replace(/,/g, '')) || 0;
+            }
+            return f > 0 ? f : 0;
+          });
+          const max = Math.max.apply(null, [1].concat(nums));
+          items.forEach((x, i) => {
+            const y = 220 + i * 88;
+            add(s, x.label, { x: IN(78), y: IN(y), w: IN(300), h: IN(60), fontSize: PT(20), color: C.fg });
+            s.addShape('rect', { x: IN(400), y: IN(y + 10), w: IN(Math.max(30, 620 * nums[i] / max)), h: IN(28), fill: { color: i % 2 ? C.accent2 : C.accent } });
+            add(s, x.value, { x: IN(1040), y: IN(y), w: IN(162), h: IN(60), fontSize: PT(22), bold: true, color: C.fg, align: 'right' });
+          });
+          break;
+        }
+
+        case 'table': {
+          header(s, sl, C, serif);
+          const cols = sl.tcols.slice(0, 4);
+          const rows = sl.trows.slice(0, 6);
+          const n = Math.max(cols.length, 1);
+          const w = 1124 / n;
+          cols.forEach((c, j) => {
+            add(s, c, { x: IN(78 + j * w), y: IN(208), w: IN(w - 12), h: IN(40), fontSize: PT(18), bold: true, color: C.accent });
+          });
+          s.addShape('line', { x: IN(78), y: IN(252), w: IN(1124), h: 0, line: { color: C.accent, width: 1 } });
+          rows.forEach((r, i) => {
+            const y = 262 + i * 62;
+            cols.forEach((_, j) => {
+              add(s, (r || [])[j] || '', { x: IN(78 + j * w), y: IN(y), w: IN(w - 12), h: IN(54), fontSize: PT(20), color: C.fg });
+            });
+          });
+          break;
+        }
+
+        case 'checklist': {
+          header(s, sl, C, serif);
+          const list = (sl.bullets || []).filter(Boolean);
+          if (list.length) {
+            const runs = list.map((t, i) => ({
+              text: '✓  ' + clean(t),
+              options: {
+                breakLine: i < list.length - 1,
+                fontSize: PT(25),
+                color: C.fg,
+                paraSpaceAfter: 12
+              }
+            }));
+            s.addText(runs, { x: IN(78), y: IN(230), w: IN(1124), h: IN(420), valign: 'top', lineSpacingMultiple: 1.15 });
+          }
+          break;
+        }
+
+        case 'cards': {
+          header(s, sl, C, serif);
+          const list = sl.cards.slice(0, 4);
+          const gap = 24, w = (1124 - gap * (Math.max(1, list.length) - 1)) / Math.max(1, list.length);
+          list.forEach((c, i) => {
+            const x = 78 + i * (w + gap);
+            s.addShape('roundRect', { x: IN(x), y: IN(220), w: IN(w), h: IN(380), fill: { color: C.bg, transparency: 84 }, line: { color: i % 2 ? C.accent2 : C.accent, width: 1 }, rectRadius: 0.06 });
+            add(s, c.heading, { x: IN(x + 20), y: IN(244), w: IN(w - 40), h: IN(70), fontSize: PT(24), bold: true, color: C.fg });
+            add(s, c.text, { x: IN(x + 20), y: IN(320), w: IN(w - 40), h: IN(240), fontSize: PT(19), color: C.muted });
           });
           break;
         }
@@ -231,6 +346,24 @@ const Exports = (() => {
     } catch (e) {
       /* imagen ilegible: la Saltamos */
     }
+  }
+
+  /** Reparte varias imágenes en una rejilla dentro del rectángulo indicado (en pulgadas). */
+  function addImageGrid(s, imgs, x, y, w, h) {
+    const list = (imgs || []).filter(Boolean).slice(0, 4);
+    const n = list.length;
+    if (!n) return;
+    if (n === 1) { addImage(s, list[0], x, y, w, h); return; }
+    const cols = n === 4 ? 2 : n;
+    const rows = Math.ceil(n / cols);
+    const gap = 0.12;
+    const cw = (w - gap * (cols - 1)) / cols;
+    const ch = (h - gap * (rows - 1)) / rows;
+    list.forEach((img, i) => {
+      const cx = x + (i % cols) * (cw + gap);
+      const cy = y + Math.floor(i / cols) * (ch + gap);
+      addImage(s, img, cx, cy, cw, ch);
+    });
   }
 
   return { pdf, pptx };

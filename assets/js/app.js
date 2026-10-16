@@ -91,6 +91,7 @@ const App = (() => {
       language: $('fLanguage').value,
       audience: $('fAudience').value.trim(),
       tone: $('fTone').value,
+      density: ($('fDensity') || {}).value || 'normal',
       style: $('fStyle').value.trim(),
       notes: $('fNotes').value.trim()
     };
@@ -121,6 +122,7 @@ const App = (() => {
     }
 
     busy = true;
+    nuevaOperacionIA();               // el botón Cancelar abortará esta tanda
     $('btnGenerate').disabled = true;
     const bar = $('genProgress');
     bar.hidden = false;
@@ -160,16 +162,21 @@ const App = (() => {
           ? ` · en equipo: ${usados.map(u => u.model).join(' + ')}`
           : ` · ${con ? con.model : ''}`) +
         (rep ? ` (${rep} completadas por la IA)` : '') +
-        (vacias ? ` · ${vacias} siguen vacías: usa "Rehacer con IA"` : ''), vacias ? 'warn' : 'ok');
+        (vacias ? ` · ${vacias} siguen con poco texto: usa "Rehacer con IA"` : ''), vacias ? 'warn' : 'ok');
       if (intentos.length > 1) {
         console.warn('Proveedores intentados:', intentos, 'errores:', raw._errores);
       }
 
       if ($('fImages').checked) setTimeout(() => Images.all(), 400);
     } catch (e) {
-      ptext.textContent = 'Error al generar.';
-      Store.toast(e.message, 'err');
-      if (e._errores) console.warn('Errores por proveedor:', e._errores);
+      if (IA_CANCELADA()) {
+        ptext.textContent = 'Generación cancelada.';
+        Store.toast('Generación cancelada.', 'warn');
+      } else {
+        ptext.textContent = 'Error al generar.';
+        Store.toast(e.message, 'err');
+        if (e._errores) console.warn('Errores por proveedor:', e._errores);
+      }
     } finally {
       busy = false;
       $('btnGenerate').disabled = false;
@@ -184,12 +191,17 @@ const App = (() => {
     if (!f.topic) f.topic = deck().title;
     if (!hayProveedor()) { Store.toast('Necesitas una clave de IA.', 'err'); openSettings(); return; }
 
+    nuevaOperacionIA();
     Store.toast('Reescribiendo la diapositiva ' + (i + 1) + '…');
     try {
       const raw = await Providers.redoSlide(deck(), i, f);
       const fresh = Store.normalizeDeck({ slides: [raw] }).slides[0];
-      fresh.id = deck().slides[i].id;
-      fresh.image = deck().slides[i].image;     // conservamos la imagen ya generada
+      const antes = deck().slides[i];
+      fresh.id = antes.id;
+      // conservamos las imágenes y sus huecos: la IA solo cambia el texto
+      fresh.images = antes.images;
+      fresh.imagePrompts = antes.imagePrompts;
+      fresh.imgCount = antes.imgCount;
       deck().slides[i] = fresh;
       Store.save();
       Editor.refresh();
@@ -495,6 +507,7 @@ const App = (() => {
       const k = $('fKey').value.trim();
       if (k) { state.settings.keys[id] = k; pendingKeys[id] = k; }
       liveModels[id] = await Providers.listModels(id);
+      Providers.recordarModelos(id, liveModels[id]);   // quedan como reservas preferentes
       fillModelSelect($('fModel'), Providers.catalogo(id), state.settings.models[id] || '', liveModels[id], 'Catálogo de ' + Providers.byId(id).name);
       $('modelHint').textContent = liveModels[id].length + ' modelos disponibles: ' + modelNote($('fModel'));
     } catch (e) {
@@ -587,18 +600,25 @@ const App = (() => {
 
   /* ---------- selector de temas ---------- */
   function buildThemes() {
-    $('themeGrid').innerHTML = THEMES.map(t => `
-      <button class="theme-chip${t.id === deck().theme ? ' on' : ''}" data-theme="${t.id}"
-        title="${t.name}" aria-label="${t.name}" aria-pressed="${t.id === deck().theme}">
+    const actual = deck().theme;
+    const chips = Store.themes().map(t => `
+      <button class="theme-chip${t.id === actual ? ' on' : ''}${t.custom ? ' custom' : ''}" data-theme="${t.id}"
+        title="${Store.esc(t.name)}" aria-label="${Store.esc(t.name)}" aria-pressed="${t.id === actual}">
         <span style="display:block;width:100%;height:100%;background:${t.swatch}"></span>
-        <span class="theme-name">${t.name}</span>
+        <span class="theme-name">${Store.esc(t.name)}</span>
+        ${t.custom ? '<span class="theme-del" data-del-theme="' + t.id + '" title="Eliminar tema">\u00d7</span>' : ''}
       </button>`).join('');
+    $('themeGrid').innerHTML = chips +
+      '<button class="theme-chip theme-new" id="btnNewTheme" title="Crear un tema propio">' +
+      '<span class="theme-plus">+</span><span class="theme-name">Crear tema</span></button>';
   }
 
   function setTheme(id) {
-    deck().theme = id;
-    document.querySelectorAll('.theme-chip').forEach(c => {
-      const on = c.dataset.theme === id;
+    const t = Store.themes().find(x => x.id === id);
+    if (!t) return;
+    deck().theme = t.id;
+    document.querySelectorAll('.theme-chip[data-theme]').forEach(c => {
+      const on = c.dataset.theme === t.id;
       c.classList.toggle('on', on);
       c.setAttribute('aria-pressed', on);
     });
@@ -606,6 +626,108 @@ const App = (() => {
     Store.save();
     Editor.refresh({ inspector: false });
     paintSteps();
+  }
+
+  /* ---------- editor de temas propios ---------- */
+  const FUENTES = {
+    sans: '"Inter", "Segoe UI", system-ui, sans-serif',
+    serif: 'Georgia, "Times New Roman", serif',
+    humanist: '"Segoe UI", Tahoma, sans-serif',
+    mono: '"Consolas", "Courier New", monospace'
+  };
+
+  function cssDelDialogo() {
+    const grad = $('thGrad').checked;
+    const bg1 = $('thBg1').value;
+    const bg2 = $('thBg2').value;
+    const ang = parseInt($('thAngle').value, 10) || 135;
+    const bg = grad ? `linear-gradient(${ang}deg, ${bg1} 0%, ${bg2} 100%)` : bg1;
+    return {
+      '--bg': bg,
+      '--fg': $('thFg').value,
+      '--accent': $('thAccent').value,
+      '--accent-2': $('thAccent2').value,
+      '--muted': $('thMuted').value,
+      '--rule': $('thRule').value.trim() || 'rgba(255,255,255,.18)',
+      '--card': $('thCard').value.trim() || 'rgba(255,255,255,.08)',
+      '--title-font': FUENTES[$('thTitleFont').value] || FUENTES.sans,
+      '--body-font': FUENTES[$('thBodyFont').value] || FUENTES.sans
+    };
+  }
+
+  function paintThemePreview() {
+    const p = $('thPreview');
+    if (!p) return;
+    const css = cssDelDialogo();
+    p.setAttribute('style', Store.cssText(css));
+    p.innerHTML = '<div class="th-prev-inner">' +
+      '<span class="th-prev-k">SECCIÓN</span>' +
+      '<h4>Título de ejemplo</h4>' +
+      '<p>El cuerpo del texto usará esta tipografía y este color.</p>' +
+      '<span class="th-prev-chip">Acento</span>' +
+      '</div>';
+  }
+
+  function openThemeEditor() {
+    const t = Store.themeById(deck().theme);
+    const c = (t && t.css) || {};
+    const simple = v => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v.trim())) ? v.trim() : null;
+    $('thName').value = t && t.custom ? t.name : 'Mi tema';
+    $('thGrad').checked = /gradient/.test(c['--bg'] || '');
+    $('thBg1').value = simple(matchHex(c['--bg'], 0)) || '#141a35';
+    $('thBg2').value = simple(matchHex(c['--bg'], 1)) || '#3a1c4d';
+    $('thFg').value = simple(c['--fg']) || '#f2f0ff';
+    $('thAccent').value = simple(c['--accent']) || '#8b7bff';
+    $('thAccent2').value = simple(c['--accent-2']) || '#35e0c1';
+    $('thMuted').value = simple(c['--muted']) || '#a9a3d4';
+    $('thRule').value = c['--rule'] || 'rgba(255,255,255,.18)';
+    $('thCard').value = c['--card'] || 'rgba(255,255,255,.08)';
+    $('thAngle').value = String(matchAngle(c['--bg']) || 135);
+    $('thTitleFont').value = FUENTES.serif.includes(String(c['--title-font'])) ? 'serif' : 'sans';
+    $('thBodyFont').value = FUENTES.serif.includes(String(c['--body-font'])) ? 'serif' : 'sans';
+    paintThemePreview();
+    const d = $('dlgTheme');
+    if (d.showModal) d.showModal();
+  }
+
+  function matchHex(v, k) {
+    const m = String(v || '').match(/#[0-9a-fA-F]{6}/g);
+    return m ? m[k || 0] : null;
+  }
+  function matchAngle(v) {
+    const m = String(v || '').match(/(\d+)deg/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function saveThemeFromDialog() {
+    const css = cssDelDialogo();
+    const nombre = $('thName').value.trim() || 'Tema propio';
+    const t = Store.normTheme({ name: nombre, css, solid: css['--bg'], serif: $('thTitleFont').value === 'serif' });
+    if (!t) { Store.toast('El tema necesita un color de fondo.', 'err'); return; }
+    t.swatch = css['--bg'];
+    const st = state.settings;
+    if (!Array.isArray(st.customThemes)) st.customThemes = [];
+    const i = st.customThemes.findIndex(x => x.id === t.id);
+    if (i >= 0) st.customThemes[i] = t; else st.customThemes.push(t);
+    deck().theme = t.id;
+    Store.save();
+    buildThemes();
+    Editor.refresh({ inspector: false });
+    Store.toast('Tema «' + t.name + '» guardado', 'ok');
+  }
+
+  function deleteTheme(id) {
+    const st = state.settings;
+    const list = st.customThemes || [];
+    const i = list.findIndex(t => t.id === id);
+    if (i < 0) return;
+    if (!window.confirm('¿Eliminar este tema propio?')) return;
+    list.splice(i, 1);
+    const restante = Store.themes();
+    if (deck().theme === id) deck().theme = restante.length ? restante[0].id : 'aurora';
+    Store.save();
+    buildThemes();
+    Editor.refresh({ inspector: false });
   }
 
   /* ---------- eventos ---------- */
@@ -623,6 +745,9 @@ const App = (() => {
     paintEmptyHint();
     Editor.refresh();
 
+    // las imágenes se guardan en IndexedDB: cuando llegan, se repinta el lienzo
+    Store.imagesReady().then(hubo => { if (hubo) Editor.refresh(); });
+
     window.addEventListener('resize', Store.debounce(() => {
       fit();
       if (Present.isOpen()) fitPresent();
@@ -633,6 +758,7 @@ const App = (() => {
     $('btnNew').onclick = newDeck;
     $('btnOpen').onclick = openFile;
     $('btnSave').onclick = () => { Store.save(); Store.toast('Guardado en este navegador', 'ok'); };
+    $('btnDownload').onclick = () => Store.saveDeckFile();
     $('btnPptx').onclick = () => Exports.pptx();
     $('btnPdf').onclick = () => Exports.pdf();
     $('btnPresent').onclick = () => Present.start();
@@ -691,11 +817,6 @@ const App = (() => {
       uiProvider = e.target.value;
       $('keyCheck').textContent = '';
       $('keyCheck').className = 'key-check';
-      paintProvider();
-    });
-    $('fProvider').addEventListener('change', e => {
-      pendingKeys[uiProvider] = $('fKey').value.trim();
-      uiProvider = e.target.value;
       paintProvider();
     });
     $('fKey').addEventListener('input', e => {
@@ -769,14 +890,28 @@ const App = (() => {
     $('btnAddTop').onclick = () => Editor.add('bullets');
     $('btnAddFoot').onclick = () => Editor.add('bullets');
     $('btnGenImages').onclick = () => Images.all();
+    $('btnWebImages').onclick = () => Images.all(false, { source: 'web' });
+    $('btnCancel').onclick = () => cancelarIA();
     $('btnNotes').onclick = openNotes;
     $('btnPanel').onclick = () => togglePanel();
 
     // Temas
     $('themeGrid').addEventListener('click', e => {
-      const c = e.target.closest('.theme-chip');
+      const del = e.target.closest('[data-del-theme]');
+      if (del) { deleteTheme(del.dataset.delTheme); return; }
+      if (e.target.closest('#btnNewTheme')) { openThemeEditor(); return; }
+      const c = e.target.closest('.theme-chip[data-theme]');
       if (c) setTheme(c.dataset.theme);
     });
+
+    const dlgTheme = $('dlgTheme');
+    if (dlgTheme) {
+      dlgTheme.addEventListener('input', paintThemePreview);
+      dlgTheme.addEventListener('change', paintThemePreview);
+      dlgTheme.addEventListener('close', () => {
+        if (dlgTheme.returnValue === 'save') saveThemeFromDialog();
+      });
+    }
 
     // Atajos
     document.addEventListener('keydown', e => {
@@ -786,6 +921,7 @@ const App = (() => {
       if (typing) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); Store.save(); Store.toast('Guardado', 'ok'); }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); openFile(); return; }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') { e.preventDefault(); Editor.undoEdit(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); Exports.pptx(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); generate(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); Chat.toggle(); }
